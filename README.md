@@ -3,8 +3,8 @@
 
 <h1>LIVE直播源</h1>
 
-<a href="https://github.com/kele551/LiveIPTV/releases" title="点击去下载"><img alt="Downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkele551-badge.kele551.workers.dev%2F%3Frepo%3DLiveIPTV%26kind%3Ddownloads&style=flat-square" height="30"></a>
-<a href="https://github.com/kele551/LiveIPTV" title="浏览量 · 实时"><img alt="浏览量" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkele551-badge.kele551.workers.dev%2F%3Frepo%3DLiveIPTV%26kind%3Dviews&style=flat-square" height="30"></a>
+<a href="https://github.com/kele551/LiveIPTV/releases" title="点击去下载（GitHub 合计 · 实时）"><img alt="Downloads" src="https://img.shields.io/github/downloads/kele551/LiveIPTV/total?style=flat-square&label=downloads" height="30"></a>
+<a href="https://github.com/kele551/LiveIPTV" title="浏览量 · 实时（hits.sh）"><img alt="浏览量" src="https://hits.sh/github.com/kele551/LiveIPTV.svg?label=views&style=flat-square" height="30"></a>
 
 <a href="https://github.com/kele551/LiveIPTV/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
 <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square">
@@ -15,9 +15,9 @@
 <a href="https://github.com/kele551/LiveIPTV/network/members"><img alt="GitHub Fork" src="https://img.shields.io/github/forks/kele551/LiveIPTV?style=flat-square&label=GitHub%20Fork&color=blue"></a>
 <a href="https://github.com/kele551"><img alt="Follow Author" src="https://img.shields.io/github/followers/kele551?style=flat-square&logo=github&label=follow%20author&color=blue"></a>
 
-<img alt="Category" src="https://img.shields.io/badge/分类-应用软件-blue?style=flat-square">
-<img alt="Zero Deps" src="https://img.shields.io/badge/第三方依赖-零-green?style=flat-square">
-<img alt="No Ad" src="https://img.shields.io/badge/广告-无-brightgreen?style=flat-square">
+<img alt="Category" src="https://img.shields.io/badge/%E5%88%86%E7%B1%BB-%E5%BA%94%E7%94%A8%E8%BD%AF%E4%BB%B6-blue?style=flat-square">
+<img alt="Zero Deps" src="https://img.shields.io/badge/%E7%AC%AC%E4%B8%89%E6%96%B9%E4%BE%9D%E8%B5%96-%E9%9B%B6-green?style=flat-square">
+<img alt="No Ad" src="https://img.shields.io/badge/%E5%B9%BF%E5%91%8A-%E6%97%A0-brightgreen?style=flat-square">
 
 <a href="https://github.com/kele551/LiveIPTV/releases"><img alt="Download from GitHub" src="https://img.shields.io/badge/%F0%9F%93%A5_%E4%B8%8B%E8%BD%BD-GitHub%E5%8F%91%E5%B8%83%E9%A1%B5-24292f?style=flat-square&logo=github&logoColor=white&labelColor=3d4552"></a>
 <a href="https://github.com/kele551/LiveIPTV"><img alt="Source" src="https://img.shields.io/badge/%F0%9F%93%82_%E6%BA%90%E7%A0%81-GitHub-24292f?style=flat-square&logo=github&logoColor=white&labelColor=3d4552"></a>
