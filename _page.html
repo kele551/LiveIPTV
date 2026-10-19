@@ -151,6 +151,13 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 .hint{font-size:12px;color:var(--sub);line-height:1.6}
 .err{color:var(--bad)}
 
+/* 首次运行的合规提示条：只声明"不含内容"，一句就能看懂 */
+.legal{display:flex;gap:14px;align-items:center;background:#fff7ed;border:1px solid #fed7aa;
+  border-radius:12px;padding:11px 14px;margin-bottom:12px}
+.legal .lt{font-weight:600;font-size:13px;color:#7c2d12;white-space:nowrap}
+.legal .ld{flex:1;font-size:12px;line-height:1.55;color:#9a3412}
+.legal .btn{flex:0 0 auto}
+
 /* toast */
 #toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%) translateY(14px);z-index:70;
   background:#1b1f24;color:#fff;font-size:13px;padding:10px 16px;border-radius:10px;opacity:0;
@@ -180,6 +187,11 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 </header>
 
 <main>
+  <div class="legal" id="legalBar" hidden>
+    <div class="lt">本程序只整理公开链接，不含任何节目内容</div>
+    <div class="ld">它不提供、不托管、不转发任何直播流，也不解除任何付费或加密限制。能不能播放、内容是否合规，取决于你所在地区和那些公开来源本身；请自行确认当地法律法规与来源授权，仅供个人自用。</div>
+    <button class="btn" id="btnLegal">我已了解</button>
+  </div>
   <div class="cards">
     <div class="card stat"><b id="sChan">-</b><span>实测可用频道</span></div>
     <div class="card stat"><b id="sSrc">-</b><span>频道总数</span></div>
@@ -450,6 +462,7 @@ function loadStatus(){
     VERSION=s.version; $("verPill").textContent="v"+s.version;
     // 保存目录一开始就填好（默认在桌面），别让用户看到空框再以为是别的盘
     if(s.desktop) DESKTOP=s.desktop;
+    if(s.legal_ack===0 && $("legalBar")) $("legalBar").hidden=false;
     if(s.save_path && !$("outdir").value){
       var sp=String(s.save_path), i=Math.max(sp.lastIndexOf("\\"), sp.lastIndexOf("/"));
       if(i>0) $("outdir").value=sp.slice(0,i);
@@ -663,7 +676,11 @@ document.addEventListener("keydown",function(e){
 });
 
 // 打开页面时只查状态：不铺上次缓存的频道，等用户自己点「立即更新」跑完再列出来
-showEmpty(); loadStatus(); setInterval(loadStatus,2000);
+showEmpty(); loadStatus(); $("btnLegal").addEventListener("click",function(){
+  fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({legal_ack:1})}).then(function(){ $("legalBar").hidden=true; });
+});
+setInterval(loadStatus,2000);
 function showEmpty(){
   renderChips(); renderRows(); updCount();
 }

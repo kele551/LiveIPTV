@@ -1,0 +1,39 @@
+name: 侵权 / 移除请求
+description: 权利人（或授权代理人）要求把某个来源从默认列表中移除
+title: "[移除请求] "
+labels: ["compliance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你联系。本程序只整理**第三方公开发布**的 m3u 链接，不托管、不转发任何节目内容。
+        如你认为某个来源不宜被整理，请按下面填写；作者会在下个版本把它从默认列表移除。
+  - type: input
+    id: source
+    attributes:
+      label: 涉及的来源地址（或仓库/站点）
+      description: 请给出具体的 m3u / m3u8 地址、或提供它的仓库、站点
+      placeholder: https://example.com/list.m3u
+    validations:
+      required: true
+  - type: textarea
+    id: right
+    attributes:
+      label: 权利依据
+      description: 你对该内容享有什么权利、以及该地址为何不宜被整理
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: 联系方式
+      description: 邮箱或其它可达方式（会公开显示在 Issue 里，介意可改用仓库主页的联系方式）
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我确认自己是该内容的权利人或经其授权的代理人
+          required: true
