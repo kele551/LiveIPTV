@@ -87,11 +87,19 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
 .thead,.tr{display:grid;grid-template-columns:44px 1fr 92px 132px 1fr;align-items:center;gap:8px;padding:0 10px}
 .thead{height:32px;font-size:12px;color:var(--sub);border-bottom:1px solid var(--line);background:var(--card)}
 .tbody{max-height:calc(100vh - 268px);overflow:auto}
-.tr{height:40px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.tr{height:44px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
 .tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
 .tr.dead{opacity:.45}
 .nm{display:flex;align-items:center;gap:9px;min-width:0}
-.nm img{width:20px;height:20px;border-radius:5px;object-fit:contain;background:var(--bg);flex:0 0 auto}
+/* 台标原图多是 300x180 的长图，硬塞进 20x20 的方框里会被缩成一条，字都看不清；
+   这里按高度定尺寸、宽度自适应(最多 40px)，长图也能占满宽度 */
+/* 台标是"透明底+白字/浅色字"，白卡片上会发白看不清：不加底色，
+   改用极细的描边阴影把轮廓勾出来，既清楚又不抢眼 */
+.nm img{height:26px;width:auto;max-width:66px;min-width:26px;border-radius:4px;
+  object-fit:contain;background:transparent;flex:0 0 auto;
+  filter:drop-shadow(0 0 .6px rgba(0,0,0,.75)) drop-shadow(0 1px 1px rgba(0,0,0,.28))}
+.nm .ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nsrc{font-size:11px;color:var(--sub);background:var(--bg);border-radius:6px;padding:0 5px;flex:0 0 auto}
 .grp{font-size:12.5px;color:var(--sub)}
@@ -165,9 +173,73 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media(max-width:820px){
   .cards{grid-template-columns:1fr 1fr}
-  .thead,.tr{grid-template-columns:40px 1fr 96px 0 0;gap:6px}
-  .thead>div:nth-child(4),.thead>div:nth-child(5),.tr>*:nth-child(4),.tr>*:nth-child(5){display:none}
+  .thead,.tr{grid-template-columns:40px 1fr 92px 118px 0;gap:6px}
+  .thead>div:nth-child(5),.tr>*:nth-child(5){display:none}
   #fname{width:110px}
+}
+
+/* ---------- 平板 ---------- */
+@media(max-width:900px){
+  .hbar{flex-wrap:wrap;row-gap:6px}
+  .hbar .brand span{display:none}
+  .fbar{gap:6px}
+  .dlg{width:min(94vw,720px);max-height:92vh}
+  .grid2{grid-template-columns:1fr 1fr}
+}
+
+/* ---------- 手机 ---------- */
+@media(max-width:600px){
+  .hbar{padding:6px 10px;gap:8px}
+  .logo{width:30px;height:30px}
+  .brand b{font-size:15px}
+  .pill{font-size:11px;padding:3px 8px}
+  #verPill{display:none}
+  .hbar .btn{padding:0 10px;height:30px;font-size:12.5px}
+  main{padding:10px 10px 96px}
+  .cards{grid-template-columns:1fr 1fr;gap:8px}
+  .stat{padding:6px 10px}
+  .stat b{font-size:17px}
+  .stat span{font-size:11px}
+  .toolbar{padding:8px 10px;gap:6px;flex-wrap:wrap}
+  .search{flex:1 1 100%;min-width:0}
+  .sortsel,.toolbar .btn{flex:0 0 auto}
+  .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px;-webkit-overflow-scrolling:touch}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto}
+  /* 手机只留：勾选 + 台标名称 + 速度；分组/首选源收进名称下面一行小字 */
+  .thead,.tr{grid-template-columns:30px 1fr 74px;gap:6px;padding:0 6px}
+  /* 手机上只留速率，"1080P"这类画质标签和数字挤在一起会换行 */
+  .tr .qa>span:first-child{display:none}
+  .thead>div:nth-child(3),.thead>div:nth-child(5),
+  .tr>*:nth-child(3),.tr>*:nth-child(5){display:none}
+  .tr>*:nth-child(4){display:block;text-align:right;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tr .qa .spd{font-size:11.5px}
+  .tr{height:auto;min-height:46px;padding-top:6px;padding-bottom:6px}
+  .nm{white-space:normal;line-height:1.3}
+  .tbody{max-height:none;overflow:visible}
+  .fbar{padding:6px 10px 8px;gap:6px}
+  .fbar .cnt{flex:1 1 100%}
+  #outdir,#fname,#btnBrowse,#btnFolder{display:none}
+  .fbar .sel{flex:1 1 100%}
+  .fbar .btn{flex:1 1 100%;height:38px;font-size:14px}
+  .fbar .btn.primary{flex:1 1 100%;height:40px;font-size:15px}
+  .dlg{width:100vw;max-width:100vw;height:100vh;max-height:100vh;border-radius:0}
+  .mask{align-items:stretch;justify-content:stretch}
+  .dbody{max-height:none;flex:1 1 auto}
+  .dfoot{padding:10px 12px}
+  .grid2,.srcs{grid-template-columns:1fr}
+  .legal{flex-direction:column;align-items:stretch}
+  .legal .btn{align-self:flex-end}
+  .dfoot{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line)}
+  .dlg{display:flex;flex-direction:column}
+}
+
+/* ---------- 小屏手机 ---------- */
+@media(max-width:430px){
+  .brand b{font-size:14px}
+  .hbar .btn{height:28px;padding:0 8px;font-size:12px}
+  .stat b{font-size:16px}
+  .thead,.tr{grid-template-columns:30px 1fr 74px}
 }
 .legal[hidden]{display:none !important}
 </style>
@@ -260,6 +332,9 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
           <label class="f ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="f ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
         <label class="f ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
+        <label class="f"><span>每个频道写入几条线路</span><input class="in" id="c_urls" type="number" min="1" max="10" step="1" value="3"></label>
+        <label class="f ck"><input type="checkbox" id="c_lan">允许手机/平板在局域网访问（手机导入用）</label>
+        <div class="f hint" id="lanHint" style="grid-column:1/-1"></div>
           <label class="f ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
         </div>
       </div>
@@ -609,6 +684,8 @@ function openCfg(){
     $("c_junk").checked=c.filter_junk!==false;
     $("c_tv").checked=c.only_tv!==false;
     $("c_lo").checked=c.hide_local!==false;
+    $("c_urls").value=(c.urls_per_channel===undefined?3:c.urls_per_channel);
+    $("c_lan").checked=!!c.lan;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -620,11 +697,19 @@ function openCfg(){
       return ((c.sources[a.key]?0:1)-(c.sources[b.key]?0:1));
     });
     fetch("/api/status").then(function(r){return r.json()}).then(function(s){
+      $("lanHint").innerHTML = s.lan
+        ? ('手机/电视盒导入地址：<b>'+(s.lan_url||"（没拿到局域网 IP）")+'</b>　（填到播放器的"添加 M3U 订阅"里，同一 Wi-Fi 下可用）')
+        : '想用手机看：勾上上面这项并保存，程序会重启一次，然后把这里给出的地址填进手机播放器。';
       var st=s.source_stats||{};
       $("c_srcs").innerHTML=SRCS.map(function(x){
         var e=st[x.key];
-        var col=!e?"var(--sub)":(e.ok?"var(--ok)":"var(--bad)");
-        var meta=!e?"未抓取":(e.ok?("<b>"+e.count+"</b> 条 · "+e.ms+"ms"+(e.fallback?" · 备选":"")+""):"抓取失败");
+        var on=!!c.sources[x.key];
+        var col=!on?"var(--sub)":(!e?"var(--sub)":(e.ok?"var(--ok)":"var(--bad)"));
+        var meta;
+        if(!on) meta="已关闭";
+        else if(!e) meta="上次没参与";
+        else if(e.ok) meta="<b>"+e.count+"</b> 条 · "+e.ms+"ms"+(e.fallback?" · 备选":"");
+        else meta="抓取失败";
         var offc=c.sources[x.key]?"":" off";
         return '<label class="src'+offc+'"><input type="checkbox" data-src="'+esc(x.key)+'"'+(c.sources[x.key]?" checked":"")+'>'
           +'<i class="st" style="background:'+col+'"></i><span class="n">'+esc(x.name)+'</span>'
@@ -648,6 +733,8 @@ $("btnCfgSave").addEventListener("click",function(){
     interval_hours:+$("c_int").value, backups:+$("c_bak").value,
     keep_sd:$("c_sd").checked, filter_junk:$("c_junk").checked, only_tv:$("c_tv").checked,
       hide_local:$("c_lo").checked,
+      urls_per_channel:(parseInt($("c_urls").value,10)||3),
+      lan:$("c_lan").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
     epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,

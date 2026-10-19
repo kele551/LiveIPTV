@@ -36,6 +36,7 @@ import ssl
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -135,6 +136,9 @@ SOURCES = [
 # 精选源：人工核对过的公网地址（2026-10-19 全部实测 200 + mpegurl）。
 # 直接内嵌成 M3U 文本，不依赖任何网络列表，也不会被别的源覆盖掉。
 CURATED = [
+    # 央视一/二套固定钉住：CCTV1 的公网源最容易被掐，实测这两条一直通
+    ("CCTV1", "http://113.57.140.161:10081/newlive/live/hls/1/live.m3u8", "央视"),
+    ("CCTV1", "http://221.226.51.220:50081/newlive/live/hls/1/live.m3u8", "央视"),
     ("CCTV4K", "http://107.150.52.50:82/live/cctv4k.m3u8", "央视"),
     ("CCTV2 财经", "http://8.138.7.223/tv/cctv2.php", "央视"),
     ("CCTV8K", "http://107.150.52.50:82/live/cctv8k.m3u8", "央视"),
@@ -237,7 +241,7 @@ for _cc, _zh in ORG_COUNTRIES:
             "https://fastly.jsdelivr.net/gh/iptv-org/iptv@master/streams/%s.m3u" % _cc,
         ]
 
-CFG_VER = 7                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
+CFG_VER = 8                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
 
 def _desktop_dir():
     """真正的桌面目录。
@@ -306,6 +310,8 @@ DEFAULT_CFG = {
     "min_mbps": 1.5,          # 低于这个码率的频道不显示/不导出（0=不限）；1.1 Mbps 那种基本是转码冒充源           # 无高清源时是否保留标清频道(供用户自行选择)
     "filter_junk": True,       # 过滤 DJ/相声/助眠/解说 这类非电视频道
     "hide_local": True,        # 不显示地级市/县级台(名字带地名的那些)，列表只留大台
+    "urls_per_channel": 1,     # 每个频道写几条线路(>1 时播放器里会出现同名条目，按需开)
+    "lan": False,              # 允许同一 Wi-Fi 的手机/平板访问控制台并订阅 M3U
     "only_tv": True,           # 只保留"电视台"频道：用 CCSH 人工整理的频道名单做白名单
     "verify_timeout": 4,       # 单源探测超时(秒)
     "concurrency": 256,        # 并发探测数(地址已去重，256 路大部分时间在等 IO)
@@ -319,11 +325,24 @@ DEFAULT_CFG = {
     "tray": True,              # 显示右下角托盘图标
     "update_auto": False,      # 发现新版本是否自动下载替换并重启
     "update_check_hours": 24,  # 程序自更新检查间隔(小时)
-    "cfg_ver": 7,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
+    "cfg_ver": 8,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
     "sources": {k: on for k, _, _, on, _ in SOURCES},
 }
 
 # 列表默认顺序：常看的在前(CCTV/卫视/港澳台)，地级台垫底
+def _lan_ip():
+    """本机在局域网里的 IPv4（拿不到返回空串）。只是让系统选一下出口网卡，不发包。"""
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.settimeout(0.5)
+        sk.connect(("223.5.5.5", 80))
+        ip = sk.getsockname()[0]
+        sk.close()
+        return "" if ip.startswith("127.") else ip
+    except Exception:
+        return ""
+
+
 def cctv_base(name):
     """是不是"标准台"名字(CCTV4 是，CCTV4K / CCTV-4 Europe 不是)，用于同号内排序。"""
     return 0 if re.fullmatch(r"cctv[-\s]?\d{1,2}", (name or "").strip(), re.I) else 1
@@ -407,6 +426,9 @@ def load_cfg():
             cfg["concurrency"] = 256  # v1.3 地址去重后可以开更多并发，明显更快
         if cfg["sources"].get("ccsh_plat"):
             cfg["sources"]["ccsh_plat"] = False  # 里面是网络直播间清单，不是电视台
+        if int(cfg.get("urls_per_channel") or 0) > 1:
+            cfg["urls_per_channel"] = 1  # 每条线路单独一行会变成播放器里的"无名 url"，默认只写一条
+            log("配置升级：每个频道只写 1 条线路(多条会让播放列表变乱，需要时在设置里调)")
             log("配置升级：已关闭「CCSH·平台源」(它是直播间清单，不是电视台)")
         # 保存位置如果落在盘根(比如 F:\)，用户其实是想存桌面，一起搬过去
         try:
@@ -948,9 +970,15 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
                     vresp.close()
                     return False, ttfb, "假源(跳转到占位视频)", 0.0, res_h, 0.0
                 vtext = read_text(vresp)
+                media_text = vtext
                 target, seg_dur = first_segment(vtext, vresp.geturl() or vurl)
             else:
+                media_text = text
                 target, seg_dur = first_segment(text, resp.geturl() or url)
+            # 真直播的清单永远不会有 EXT-X-ENDLIST；带这个标记又很短的，基本都是
+            # 广告占位/循环录播(换了台标也放同一条片子)，直接判掉
+            if "#EXT-X-ENDLIST" in (media_text or "").upper():
+                return False, ttfb, "录播/广告占位(清单已结束)", 0.0, res_h, 0.0
             if not target:
                 return False, ttfb, "清单里没有可播放分片", 0.0, res_h, 0.0
             resp = _open(target, timeout)
@@ -1122,6 +1150,9 @@ LOGO_TPLS = [
 ]
 LOGO_TTL = 7 * 86400          # 台标实测结果缓存 7 天
 _LOGO_CACHE = {}              # url -> [unix_ts, ok]
+_LOGO_BYTES = {}              # url -> (content_type, bytes)  台标本地中转缓存(最多 600 张)
+_LOGO_BYTES_MAX = 600
+LOGO_DIR = BASE / "logos"      # 台标图片本地留档：程序重启后 /logo 也不用再出网
 
 def _load_logo_cache():
     try:
@@ -1141,21 +1172,68 @@ def _save_logo_cache():
         pass
 
 def _check_logo(url, timeout=2):
-    """HTTP 200 且响应头几个字节为 PNG/JPEG 魔数才认定为可用台标(防 JSON/HTML 冒充)"""
+    """HTTP 200 且响应头几个字节为 PNG/JPEG 魔数才认定为可用台标(防 JSON/HTML 冒充)。
+    顺手把图片字节留在内存里，页面走 /logo 直接用，不用第二次出网。"""
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=UA),
                                     timeout=timeout, context=_SSL_CTX) as r:
-            head = r.read(16)
-        return head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8\xff")
+            ctype = r.headers.get("Content-Type") or "image/png"
+            body = r.read(400 * 1024)
+        if not (body.startswith(b"\x89PNG") or body.startswith(b"\xff\xd8\xff")
+                or body.startswith(b"GIF8") or body[:4] == b"RIFF"):
+            return False
+        if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
+            _LOGO_BYTES.clear()
+        _LOGO_BYTES[url] = (ctype, body)
+        try:
+            LOGO_DIR.mkdir(parents=True, exist_ok=True)
+            (LOGO_DIR / _logo_file(url)).write_bytes(body)
+        except OSError:
+            pass
+        return True
     except Exception:
         return False
+
+def _logo_file(url):
+    import hashlib
+    return hashlib.sha1(url.encode("utf-8")).hexdigest() + ".img"
+
+
+def _logo_from_disk(url):
+    """磁盘缓存里直接读（有就直接用，不用管图标站现在还能不能访问）"""
+    try:
+        p = LOGO_DIR / _logo_file(url)
+        if p.exists():
+            body = p.read_bytes()
+            if body.startswith(b"\x89PNG"):
+                return ("image/png", body)
+            if body.startswith(b"\xff\xd8\xff"):
+                return ("image/jpeg", body)
+            if body.startswith(b"GIF8"):
+                return ("image/gif", body)
+            if body[:4] == b"RIFF":
+                return ("image/webp", body)
+    except OSError:
+        pass
+    return None
+
 
 def resolve_logo(name, src_logo):
     """台标候选链：源自带(逐条实测) -> CCSH 图标库(中文名) -> fanmingming 图标库(中文名)。
     任何候选必须实测 200+图片魔数才采用；结果缓存 7 天。返回可用 URL 或空串。"""
-    # 源自带的台标直接采用(全是 https 图片地址，逐条实测白花时间)；只有它缺失才去图标库找
+    # 源自带的台标也要验一次：很多聚合源里是死链/防盗链，浏览器里就是一个个灰方块
+    # (缓存在 _LOGO_CACHE，命中不花时间；验证过的坏链会继续往下走图标库补)
     if src_logo and src_logo.startswith(("https://", "http://")):
-        return src_logo
+        now0 = time.time()
+        ent0 = _LOGO_CACHE.get(src_logo)
+        if ent0 and now0 - ent0[0] < LOGO_TTL:
+            if ent0[1]:
+                return src_logo
+        else:
+            ok0 = _check_logo(src_logo)
+            _LOGO_CACHE[src_logo] = [now0, ok0]
+            if ok0:
+                return src_logo
     cands = []
     qn = quote(name)
     cands += [t.format(name=qn) for t in LOGO_TPLS]
@@ -1513,9 +1591,34 @@ class Updater:
         counter[0] = 0
 
 
+        # 同域复用(参考 Guovin 的 speed_test_filter_host)：同一个 host:port 上
+        # - 连着两个地址都不通、且一次都没成功 → 整站判死，后面同域的直接跳过
+        # - 已经有一个地址成功过 → 后面的只做"能不能出画面"的快速确认(0.35s 窗口)
+        host_fail, host_ok, host_speed = {}, set(), {}
+
         def work(u):
             recs = by_url[u]
-            ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=2.5)
+            hp = hp_of(u)
+            with lock:
+                dead = host_fail.get(hp, 0) >= 2 and hp not in host_ok
+                hint = host_speed.get(hp)
+            if dead:
+                for sl in recs:
+                    sl["live"], sl["ttfb"], sl["note"] = False, 0, "同服务器整批不通，已跳过"
+                with lock:
+                    counter[0] += 1
+                    self.state["done"] = counter[0]
+                return
+            ok, ttfb, note, mbps, res_h, speed = probe_stream(
+                recs[0], timeout=2.5, budget=(0.35 if hint else 1.5))
+            if hint and (not speed or speed < hint):
+                speed = hint
+            with lock:
+                if ok:
+                    host_ok.add(hp)
+                    host_speed[hp] = max(host_speed.get(hp, 0), speed or 0)
+                elif note.startswith(("不可达", "连接被", "超时", "timed")):
+                    host_fail[hp] = host_fail.get(hp, 0) + 1
             if not ok and note.startswith("返回网页"):
                 mark_bad_url(u)
             # 能连上但吞吐低到 0.5 Mbps 以下，播起来必然卡：直接当不能用，别让它挤掉好线路
@@ -1657,9 +1760,18 @@ class Updater:
         """把"翡翠台 / TVB翡翠台 HD"、"TVBS亚洲 / TVBS亚洲台"这种同一个台的不同叫法
         合成一条（源合并、只留一个名字），免得列表里堆一堆重复、还互相抢排序。"""
         noise = re.compile(r"(tvb|hd|高清|超清|蓝光|4k|uhd|sd|标清|流畅|频道|电视台|卫视)")
+        # 央视的"官方后缀"：CCTV2 财经 / CCTV-2 财经 / CCTV2 都指同一个频道，统一收成 CCTV2
+        cctv_suffix = re.compile(
+            r"^cctv[\-\s]?(\d{1,2})\s*(综合|财经|中文国际|综艺|体育|电影|军事农业|国防军事|"
+            r"农业农村|电视剧|纪录|科教|戏曲|社会与法|新闻|少儿|音乐|体育赛事|奥林匹克|"
+            r"世界地理|怀旧剧场|第一剧场|风云剧场|风云音乐|风云足球|兵器科技|女性时尚|"
+            r"文化精品|卫生健康|央视台球|高尔夫网球|央视文化精品)?$")
 
         def norm(name):
             n = unicodedata.normalize("NFKC", name).lower()
+            m = cctv_suffix.match(n.strip())
+            if m:
+                n = "cctv" + m.group(1)      # 只按频道号归一，后缀丢掉
             n = noise.sub("", n)
             n = re.sub(r"[\s·・\-_/()（）\[\]【】]+", "", n)
             return n.rstrip("台") or n
@@ -1797,6 +1909,7 @@ class Updater:
             CACHE_PATH.write_text(json.dumps({
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
                 "channels": channels,
+                "source_stats": self.state.get("source_stats") or {},   # 上次各源抓到多少条，重启后还要显示
             }, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
             log("缓存保存失败: %s" % e)
@@ -1813,6 +1926,8 @@ class Updater:
             self.channels = data["channels"]
             self.state["stats"] = self.compute_stats(self.channels)
             self.state["last_update"] = saved.strftime("%Y-%m-%d %H:%M:%S")
+            if data.get("source_stats"):
+                self.state["source_stats"] = data["source_stats"]   # 别让设置页在重启后显示"未抓取"
             self.state["next_update"] = time.time() + max(0, self.cfg["interval_hours"] - age_h) * 3600
             log("已加载缓存: %d 频道(%.1f 小时前更新)" % (len(self.channels), age_h))
             return True
@@ -1831,8 +1946,10 @@ class Updater:
         if self.cfg["epg_url"]:
             lines[0] += ' x-tvg-url="%s"' % self.cfg["epg_url"]
         lines.append("# 由 %s v%s 生成于 %s" % (APP_NAME, VERSION, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        lines.append("# 筛选标准(程序权威)：画质(实测分辨率4K/1080P优先) > 区域基准 > 链接速度；每个频道仅保留唯一最佳源")
         n_src = n_ch = n_skip = 0
+        n_urls = max(1, min(10, int(self.cfg.get("urls_per_channel") or 3)))
+        lines.append("# 筛选标准：画质(实测分辨率 4K/1080P 优先) > 区域基准 > 链路速度；"
+                     "每个频道最多写 %d 条实测可用线路" % n_urls)
         present = sorted({ch["group"] for ch in channels.values()},
                          key=lambda g: (GROUP_RANK.index(g) if g in GROUP_RANK else 50, g))
         for g in present:
@@ -1854,11 +1971,33 @@ class Updater:
                 if mm and (best.get("mbps") or 0) < mm:
                     n_skip += 1
                     continue
+                # 同一频道所有实测可用线路(分辨率→速率排序)，写前 n_urls 条当备份
+                cand = []
+                for sl in (ch.get("sources") or []):
+                    if not (sl.get("live") and sl.get("url")):
+                        continue
+                    _m = sl.get("mbps") or 0
+                    if mm and _m and _m < mm:
+                        continue
+                    cand.append(sl)
+                cand.sort(key=lambda sl: (-(sl.get("res") or 0),
+                                          -((sl.get("speed") or 0) or (sl.get("mbps") or 0))))
+                seen_url, urls = set(), []
+                for sl in cand:
+                    if sl["url"] in seen_url:
+                        continue
+                    seen_url.add(sl["url"])
+                    urls.append(sl["url"])
+                    if len(urls) >= n_urls:
+                        break
+                if not urls:
+                    urls = [best["url"]]
                 n_ch += 1
-                n_src += 1
-                lines.append('#EXTINF:-1 tvg-name="%s" tvg-logo="%s" group-title="%s",%s'
-                             % (esc_attr(ch["name"]), esc_attr(ch["logo"]), g, ch["name"]))
-                lines.append(best["url"])
+                n_src += len(urls)
+                for _u in urls:
+                    lines.append('#EXTINF:-1 tvg-name="%s" tvg-logo="%s" group-title="%s",%s'
+                                 % (esc_attr(ch["name"]), esc_attr(ch["logo"]), g, ch["name"]))
+                    lines.append(_u)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
@@ -1986,11 +2125,19 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
 .thead,.tr{display:grid;grid-template-columns:44px 1fr 92px 132px 1fr;align-items:center;gap:8px;padding:0 10px}
 .thead{height:32px;font-size:12px;color:var(--sub);border-bottom:1px solid var(--line);background:var(--card)}
 .tbody{max-height:calc(100vh - 268px);overflow:auto}
-.tr{height:40px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.tr{height:44px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
 .tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
 .tr.dead{opacity:.45}
 .nm{display:flex;align-items:center;gap:9px;min-width:0}
-.nm img{width:20px;height:20px;border-radius:5px;object-fit:contain;background:var(--bg);flex:0 0 auto}
+/* 台标原图多是 300x180 的长图，硬塞进 20x20 的方框里会被缩成一条，字都看不清；
+   这里按高度定尺寸、宽度自适应(最多 40px)，长图也能占满宽度 */
+/* 台标是"透明底+白字/浅色字"，白卡片上会发白看不清：不加底色，
+   改用极细的描边阴影把轮廓勾出来，既清楚又不抢眼 */
+.nm img{height:26px;width:auto;max-width:66px;min-width:26px;border-radius:4px;
+  object-fit:contain;background:transparent;flex:0 0 auto;
+  filter:drop-shadow(0 0 .6px rgba(0,0,0,.75)) drop-shadow(0 1px 1px rgba(0,0,0,.28))}
+.nm .ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nsrc{font-size:11px;color:var(--sub);background:var(--bg);border-radius:6px;padding:0 5px;flex:0 0 auto}
 .grp{font-size:12.5px;color:var(--sub)}
@@ -2064,9 +2211,73 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media(max-width:820px){
   .cards{grid-template-columns:1fr 1fr}
-  .thead,.tr{grid-template-columns:40px 1fr 96px 0 0;gap:6px}
-  .thead>div:nth-child(4),.thead>div:nth-child(5),.tr>*:nth-child(4),.tr>*:nth-child(5){display:none}
+  .thead,.tr{grid-template-columns:40px 1fr 92px 118px 0;gap:6px}
+  .thead>div:nth-child(5),.tr>*:nth-child(5){display:none}
   #fname{width:110px}
+}
+
+/* ---------- 平板 ---------- */
+@media(max-width:900px){
+  .hbar{flex-wrap:wrap;row-gap:6px}
+  .hbar .brand span{display:none}
+  .fbar{gap:6px}
+  .dlg{width:min(94vw,720px);max-height:92vh}
+  .grid2{grid-template-columns:1fr 1fr}
+}
+
+/* ---------- 手机 ---------- */
+@media(max-width:600px){
+  .hbar{padding:6px 10px;gap:8px}
+  .logo{width:30px;height:30px}
+  .brand b{font-size:15px}
+  .pill{font-size:11px;padding:3px 8px}
+  #verPill{display:none}
+  .hbar .btn{padding:0 10px;height:30px;font-size:12.5px}
+  main{padding:10px 10px 96px}
+  .cards{grid-template-columns:1fr 1fr;gap:8px}
+  .stat{padding:6px 10px}
+  .stat b{font-size:17px}
+  .stat span{font-size:11px}
+  .toolbar{padding:8px 10px;gap:6px;flex-wrap:wrap}
+  .search{flex:1 1 100%;min-width:0}
+  .sortsel,.toolbar .btn{flex:0 0 auto}
+  .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px;-webkit-overflow-scrolling:touch}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto}
+  /* 手机只留：勾选 + 台标名称 + 速度；分组/首选源收进名称下面一行小字 */
+  .thead,.tr{grid-template-columns:30px 1fr 74px;gap:6px;padding:0 6px}
+  /* 手机上只留速率，"1080P"这类画质标签和数字挤在一起会换行 */
+  .tr .qa>span:first-child{display:none}
+  .thead>div:nth-child(3),.thead>div:nth-child(5),
+  .tr>*:nth-child(3),.tr>*:nth-child(5){display:none}
+  .tr>*:nth-child(4){display:block;text-align:right;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tr .qa .spd{font-size:11.5px}
+  .tr{height:auto;min-height:46px;padding-top:6px;padding-bottom:6px}
+  .nm{white-space:normal;line-height:1.3}
+  .tbody{max-height:none;overflow:visible}
+  .fbar{padding:6px 10px 8px;gap:6px}
+  .fbar .cnt{flex:1 1 100%}
+  #outdir,#fname,#btnBrowse,#btnFolder{display:none}
+  .fbar .sel{flex:1 1 100%}
+  .fbar .btn{flex:1 1 100%;height:38px;font-size:14px}
+  .fbar .btn.primary{flex:1 1 100%;height:40px;font-size:15px}
+  .dlg{width:100vw;max-width:100vw;height:100vh;max-height:100vh;border-radius:0}
+  .mask{align-items:stretch;justify-content:stretch}
+  .dbody{max-height:none;flex:1 1 auto}
+  .dfoot{padding:10px 12px}
+  .grid2,.srcs{grid-template-columns:1fr}
+  .legal{flex-direction:column;align-items:stretch}
+  .legal .btn{align-self:flex-end}
+  .dfoot{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line)}
+  .dlg{display:flex;flex-direction:column}
+}
+
+/* ---------- 小屏手机 ---------- */
+@media(max-width:430px){
+  .brand b{font-size:14px}
+  .hbar .btn{height:28px;padding:0 8px;font-size:12px}
+  .stat b{font-size:16px}
+  .thead,.tr{grid-template-columns:30px 1fr 74px}
 }
 .legal[hidden]{display:none !important}
 </style>
@@ -2159,6 +2370,9 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
           <label class="f ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="f ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
         <label class="f ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
+        <label class="f"><span>每个频道写入几条线路</span><input class="in" id="c_urls" type="number" min="1" max="10" step="1" value="3"></label>
+        <label class="f ck"><input type="checkbox" id="c_lan">允许手机/平板在局域网访问（手机导入用）</label>
+        <div class="f hint" id="lanHint" style="grid-column:1/-1"></div>
           <label class="f ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
         </div>
       </div>
@@ -2508,6 +2722,8 @@ function openCfg(){
     $("c_junk").checked=c.filter_junk!==false;
     $("c_tv").checked=c.only_tv!==false;
     $("c_lo").checked=c.hide_local!==false;
+    $("c_urls").value=(c.urls_per_channel===undefined?3:c.urls_per_channel);
+    $("c_lan").checked=!!c.lan;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -2519,11 +2735,19 @@ function openCfg(){
       return ((c.sources[a.key]?0:1)-(c.sources[b.key]?0:1));
     });
     fetch("/api/status").then(function(r){return r.json()}).then(function(s){
+      $("lanHint").innerHTML = s.lan
+        ? ('手机/电视盒导入地址：<b>'+(s.lan_url||"（没拿到局域网 IP）")+'</b>　（填到播放器的"添加 M3U 订阅"里，同一 Wi-Fi 下可用）')
+        : '想用手机看：勾上上面这项并保存，程序会重启一次，然后把这里给出的地址填进手机播放器。';
       var st=s.source_stats||{};
       $("c_srcs").innerHTML=SRCS.map(function(x){
         var e=st[x.key];
-        var col=!e?"var(--sub)":(e.ok?"var(--ok)":"var(--bad)");
-        var meta=!e?"未抓取":(e.ok?("<b>"+e.count+"</b> 条 · "+e.ms+"ms"+(e.fallback?" · 备选":"")+""):"抓取失败");
+        var on=!!c.sources[x.key];
+        var col=!on?"var(--sub)":(!e?"var(--sub)":(e.ok?"var(--ok)":"var(--bad)"));
+        var meta;
+        if(!on) meta="已关闭";
+        else if(!e) meta="上次没参与";
+        else if(e.ok) meta="<b>"+e.count+"</b> 条 · "+e.ms+"ms"+(e.fallback?" · 备选":"");
+        else meta="抓取失败";
         var offc=c.sources[x.key]?"":" off";
         return '<label class="src'+offc+'"><input type="checkbox" data-src="'+esc(x.key)+'"'+(c.sources[x.key]?" checked":"")+'>'
           +'<i class="st" style="background:'+col+'"></i><span class="n">'+esc(x.name)+'</span>'
@@ -2547,6 +2771,8 @@ $("btnCfgSave").addEventListener("click",function(){
     interval_hours:+$("c_int").value, backups:+$("c_bak").value,
     keep_sd:$("c_sd").checked, filter_junk:$("c_junk").checked, only_tv:$("c_tv").checked,
       hide_local:$("c_lo").checked,
+      urls_per_channel:(parseInt($("c_urls").value,10)||3),
+      lan:$("c_lan").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
     epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
@@ -2648,6 +2874,65 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/":
             return self._html(PAGE.replace("__FAVICON__", "data:image/png;base64," + FAVICON_B64))
+        if path == "/logo":
+            q = parse_qs(urlsplit(self.path).query)
+            u = (q.get("u") or [""])[0]
+            if not u.startswith(("http://", "https://")):
+                self.send_error(400, "bad logo url")
+                return
+            data = _LOGO_BYTES.get(u) or _logo_from_disk(u)
+            if data is None and u in _LOGO_CACHE and _LOGO_CACHE[u][1]:
+                # 只转发"服务端亲手验证过"的地址，避免变成任意代理
+                ent = _LOGO_CACHE.get(u)
+                if not (ent and ent[1]):
+                    ok = _check_logo(u)
+                    _LOGO_CACHE[u] = [time.time(), ok]
+                    if not ok:
+                        self.send_error(404, "logo not available")
+                        return
+                try:
+                    hdr = dict(UA)
+                    hdr["Referer"] = u.rsplit("/", 1)[0] + "/"
+                    req = urllib.request.Request(u, headers=hdr)
+                    with urllib.request.urlopen(req, timeout=8, context=_SSL_CTX) as r:
+                        ctype = r.headers.get("Content-Type") or "image/png"
+                        body = r.read(400 * 1024)
+                except Exception:
+                    self.send_error(404, "logo fetch failed")
+                    return
+                if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
+                    _LOGO_BYTES.clear()
+                data = (ctype, body)
+                _LOGO_BYTES[u] = data
+            self.send_response(200)
+            self.send_header("Content-Type", data[0])
+            self.send_header("Content-Length", str(len(data[1])))
+            self.send_header("Cache-Control", "public, max-age=604800")
+            self.end_headers()
+            self.wfile.write(data[1])
+            return
+        if path == "/list.m3u":
+            with self.updater.lock:
+                chs = list(self.updater.channels.values())
+            tmp = Path(tempfile.gettempdir()) / "live_iptv_lan.m3u"
+            try:
+                self.updater.write_m3u(tmp)
+                body = tmp.read_bytes()
+            except Exception as e:
+                body = ("#EXTM3U\n# 生成失败: %s\n" % e).encode("utf-8")
+            finally:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/x-mpegurl; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="LiveIPTV.m3u"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/status":
             st = dict(self.updater.state)
             with self.updater.lock:
@@ -2663,6 +2948,9 @@ class Handler(BaseHTTPRequestHandler):
                 "save_path": self.cfg.get("output_path", ""),
             "desktop": str(_desktop_dir()),
             "legal_ack": int(self.cfg.get("legal_ack") or 0),
+            "lan": bool(self.cfg.get("lan")),
+            "lan_url": ("http://%s:%d/list.m3u" % (_lan_ip(), _SERVER.server_address[1])
+                        if self.cfg.get("lan") and _lan_ip() else ""),
             })
         if path == "/api/selfcheck":
             info = check_self_update(self.cfg, force=True)
@@ -2698,6 +2986,14 @@ class Handler(BaseHTTPRequestHandler):
             channels.sort(key=lambda c: (GROUP_RANK.index(c["group"]) if c["group"] in GROUP_RANK else 50,
                                          cctv_num(c["name"]), cctv_base(c["name"]),
                                          -((c["best"].get("speed") or 0) or (c["best"].get("mbps") or 0)), c["name"]))
+            # 台标一律走本机中转：图标站有防盗链/跨域，直连在浏览器里就是一个个灰方块
+            out = []
+            for c in channels:
+                c2 = dict(c)
+                lg = (c2.get("logo") or "").strip()
+                c2["logo"] = ("/logo?u=" + quote(lg, safe="")) if lg.startswith(("http://", "https://")) else ""
+                out.append(c2)
+            channels = out
             return self._json({"channels": channels,
                                "save_dir": str(Path(self.cfg["output_path"]).parent),
                                "saved_at": self.updater.state["last_update"]})
@@ -2767,7 +3063,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "msg": "保存失败: %s" % e})
         if path == "/api/settings":
             try:
-                new = {k: data[k] for k in ("interval_hours", "backups", "keep_sd", "filter_junk", "only_tv", "min_mbps", "hide_local",
+                new = {k: data[k] for k in ("interval_hours", "backups", "keep_sd", "filter_junk", "only_tv", "min_mbps", "hide_local", "urls_per_channel", "lan",
                                             "legal_ack",
          "output_path",
                                             "epg_url", "open_browser", "autostart", "task_registered",
@@ -3335,7 +3631,8 @@ def main():
     httpd = None
     for p in range(cfg["port"], cfg["port"] + 10):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", p), Handler)
+            host = "0.0.0.0" if cfg.get("lan") else "127.0.0.1"
+            httpd = ThreadingHTTPServer((host, p), Handler)
             break
         except OSError:
             continue
