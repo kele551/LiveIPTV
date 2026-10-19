@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LIVE直播源</title>
+<link rel="icon" href="__FAVICON__">
+<style>
+:root{
+  --accent:#e11d2e; --accent-d:#c21423; --accent-l:#fdecee;
+  --bg:#f4f5f7; --card:#fff; --txt:#1b1f24; --sub:#6b7280; --line:#e6e8ec;
+  --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 8px 24px -12px rgba(16,24,40,.18);
+  --r:14px;
+}
+html[data-theme="dark"]{
+  --bg:#101216; --card:#181c22; --txt:#e8eaee; --sub:#9aa2ae; --line:#262c35;
+  --accent-l:#3a1218; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);
+  font:14px/1.55 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  -webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+input,select{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none}
+
+/* ---------------- 顶栏 ---------------- */
+header{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--card) 88%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.hbar{max-width:1120px;margin:0 auto;padding:8px 18px;display:flex;align-items:center;gap:12px}
+.logo{width:38px;height:38px;border-radius:0;box-shadow:none;background:transparent;display:block}
+.brand{display:flex;flex-direction:column;line-height:1.15}
+.brand b{font-size:16px;letter-spacing:.2px}
+.brand span{font-size:11px;color:var(--sub)}
+.pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;
+  background:var(--bg);border:1px solid var(--line);font-size:12px;color:var(--sub);white-space:nowrap}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--sub)}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}
+.dot.run{background:var(--accent);animation:blink 1s infinite}
+/* 状态图标跟右下角托盘同款：红圆角方块 + 白三角（空闲） / 白方块（更新中） */
+.ti{width:15px;height:15px;border-radius:4.5px;flex:0 0 auto;position:relative;
+  background:linear-gradient(180deg,#f50a38,#c4001a);box-shadow:0 1px 2px rgba(225,29,46,.35)}
+.ti::after{content:"";position:absolute;left:5.5px;top:3.5px;width:0;height:0;
+  border-left:6px solid #fff;border-top:4px solid transparent;border-bottom:4px solid transparent}
+.ti.run::after{left:4.5px;top:4.5px;width:6px;height:6px;border:0;background:#fff;border-radius:1px}
+.ti.run{animation:blink 1s infinite}
+.ti.off{filter:grayscale(1);opacity:.55}
+@keyframes blink{50%{opacity:.25}}
+.spacer{flex:1}
+.btn{height:32px;padding:0 13px;border-radius:10px;border:1px solid var(--line);background:var(--card);
+  color:var(--txt);font-size:13px;display:inline-flex;align-items:center;gap:6px;transition:.15s}
+.btn:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.primary:hover{background:var(--accent-d);color:#fff}
+.btn.danger:hover{border-color:var(--bad);color:var(--bad)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* 进度条 */
+.pwrap{height:3px;background:transparent;overflow:hidden}
+.pwrap.show{background:var(--line)}
+.pbar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),#ff6b7a);transition:width .35s}
+
+/* ---------------- 主体 ---------------- */
+main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.stat{padding:8px 12px}
+.stat b{display:block;font-size:19px;line-height:1.15;font-variant-numeric:tabular-nums}
+.stat span{font-size:11.5px;color:var(--sub)}
+.phase{font-size:12px;color:var(--sub);padding:0 2px 8px;grid-column:1/-1}
+
+.toolbar{padding:9px 12px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.search{flex:1;min-width:180px;height:32px;border:1px solid var(--line);border-radius:10px;
+  background:var(--bg);padding:0 12px;outline:none}
+.search:focus{border-color:var(--accent);background:var(--card)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:transparent;
+  font-size:12.5px;color:var(--sub);transition:.15s}
+.chip:hover{color:var(--txt);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.chip.on{background:var(--accent-l);border-color:color-mix(in srgb,var(--accent) 40%,var(--line));color:var(--accent);font-weight:600}
+.qsep{width:1px;height:20px;background:var(--line);margin:0 2px}
+
+/* 列表 */
+.list{margin-top:10px;overflow:hidden}
+.thead,.tr{display:grid;grid-template-columns:44px 1fr 92px 132px 1fr;align-items:center;gap:8px;padding:0 10px}
+.thead{height:32px;font-size:12px;color:var(--sub);border-bottom:1px solid var(--line);background:var(--card)}
+.tbody{max-height:calc(100vh - 268px);overflow:auto}
+.tr{height:40px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
+.tr.dead{opacity:.45}
+.nm{display:flex;align-items:center;gap:9px;min-width:0}
+.nm img{width:20px;height:20px;border-radius:5px;object-fit:contain;background:var(--bg);flex:0 0 auto}
+.nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nsrc{font-size:11px;color:var(--sub);background:var(--bg);border-radius:6px;padding:0 5px;flex:0 0 auto}
+.grp{font-size:12.5px;color:var(--sub)}
+.qa{display:flex;align-items:center;gap:6px;font-size:12.5px}
+.tag{font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;background:var(--bg);color:var(--sub);border:1px solid var(--line)}
+.tag.q4{color:#7c3aed;border-color:#ddd6fe;background:#f5f3ff}
+.tag.q3{color:#0369a1;border-color:#bae6fd;background:#f0f9ff}
+.tag.q2{color:#4d7c0f;border-color:#d9f99d;background:#f7fee7}
+.spd{font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+.host{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px;min-width:0}
+.host .h{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini{opacity:0;height:22px;padding:0 8px;border-radius:7px;border:1px solid var(--line);
+  background:var(--card);font-size:11.5px;color:var(--sub);transition:.15s;flex:0 0 auto}
+.tr:hover .mini{opacity:1}
+.mini:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+.lowb{font-size:10.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;
+  border-radius:5px;padding:0 4px;flex:0 0 auto}
+input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.empty{padding:36px 16px;text-align:center;color:var(--sub);font-size:13px}
+
+/* 底栏 */
+footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in srgb,var(--card) 94%,transparent);
+  backdrop-filter:blur(10px);border-top:1px solid var(--line)}
+.fbar{max-width:1120px;margin:0 auto;padding:8px 18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sel{font-size:13px;color:var(--sub);white-space:nowrap}
+.sel b{color:var(--accent)}
+.field{height:32px;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:0 10px;outline:none;min-width:0}
+.field:focus{border-color:var(--accent);background:var(--card)}
+#outdir{flex:1;min-width:220px}
+#fname{width:150px}
+
+/* 弹窗 */
+.mask{position:fixed;inset:0;background:rgba(15,18,23,.45);display:none;align-items:center;justify-content:center;
+  z-index:60;padding:20px}
+.mask.show{display:flex}
+.dlg{background:var(--card);border-radius:16px;box-shadow:0 24px 60px -20px rgba(0,0,0,.5);
+  width:min(760px,100%);max-height:88vh;display:flex;flex-direction:column;overflow:hidden}
+.dlg.sm{width:min(420px,100%)}
+.dhead{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+.dhead b{font-size:15px}
+.dbody{padding:16px 20px;overflow:auto}
+.dfoot{padding:12px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}
+.sec{margin-bottom:18px}
+.sec>h4{margin:0 0 10px;font-size:12.5px;color:var(--sub);font-weight:600;letter-spacing:.3px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.f{display:flex;flex-direction:column;gap:5px;font-size:12.5px;color:var(--sub)}
+.f input[type=text],.f input[type=number]{height:34px;border:1px solid var(--line);border-radius:9px;
+  background:var(--bg);padding:0 10px;color:var(--txt);outline:none;width:100%}
+.f input:focus{border-color:var(--accent);background:var(--card)}
+.f label.ck{display:flex;align-items:center;gap:8px;height:34px;color:var(--txt);font-size:13px;cursor:pointer}
+.srcs{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+.src{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 6px;border-radius:8px}
+.src:hover{background:var(--bg)}
+.src .st{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.src .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.src .m{color:var(--sub);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.hint{font-size:12px;color:var(--sub);line-height:1.6}
+.err{color:var(--bad)}
+
+/* toast */
+#toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%) translateY(14px);z-index:70;
+  background:#1b1f24;color:#fff;font-size:13px;padding:10px 16px;border-radius:10px;opacity:0;
+  pointer-events:none;transition:.22s;max-width:88vw;box-shadow:0 12px 30px -10px rgba(0,0,0,.6)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media(max-width:820px){
+  .cards{grid-template-columns:1fr 1fr}
+  .thead,.tr{grid-template-columns:40px 1fr 96px 0 0;gap:6px}
+  .thead>div:nth-child(4),.thead>div:nth-child(5),.tr>*:nth-child(4),.tr>*:nth-child(5){display:none}
+  #fname{width:110px}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="hbar">
+    <img class="logo" src="__FAVICON__" alt="">
+    <div class="brand"><b>LIVE直播源</b><span>港澳台 + 央视卫视 + 地方台 · 自动测速挑源</span></div>
+    <span class="pill" id="verPill">v-</span>
+    <span class="pill"><i class="ti" id="stDot"></i><span id="stTxt">启动中…</span></span>
+    <span class="spacer"></span>
+    <button class="btn primary" id="btnUpdate">立即更新</button>
+    <button class="btn" id="btnCfg">设置</button>
+    <button class="btn danger" id="btnQuit">退出</button>
+  </div>
+  <div class="pwrap" id="progwrap"><div class="pbar" id="prog"></div></div>
+</header>
+
+<main>
+  <div class="cards">
+    <div class="card stat"><b id="sChan">-</b><span>实测可用频道</span></div>
+    <div class="card stat"><b id="sSrc">-</b><span>频道总数</span></div>
+    <div class="card stat"><b id="sHkmt">-</b><span>港澳台频道</span></div>
+    <div class="card stat"><b id="sTime">-</b><span>上次更新</span></div>
+  </div>
+
+  <div class="card toolbar">
+    <div class="row">
+      <input class="search" id="q" placeholder="搜索频道名，例如 CCTV5 / 翡翠台 / 湖南卫视">
+      <select class="field sortsel" id="sort" title="排序方式">
+        <option value="speed">最快优先</option>
+        <option value="group">按分组</option>
+        <option value="name">按名称</option>
+      </select>
+      <button class="btn" id="btnAll">全选</button>
+      <button class="btn" id="btnInv">反选</button>
+    </div>
+    <div class="row chips" id="chips"></div>
+    <div class="row chips" id="chipsQ">
+      <button class="chip" data-q="4">4K</button>
+      <button class="chip" data-q="1080P">1080P</button>
+      <button class="chip" data-q="HD">高清</button>
+      <span class="qsep"></span>
+            <button class="chip" data-qk="alive">仅可用</button>
+    </div>
+  </div>
+
+  <div class="card list">
+    <div class="thead"><div><input type="checkbox" id="ckAll"></div><div>频道</div><div>分组</div><div>画质 / 实测</div><div>首选源</div></div>
+    <div class="tbody" id="rows"><div class="empty">点右上角「立即更新」开始检测直播源。<br><span class="hint">每一轮都会重新实测，不会沿用上次的结果。</span></div></div>
+  </div>
+</main>
+
+<footer>
+  <div class="fbar">
+    <span class="sel">已选 <b id="selN">0</b> / <span id="selT">0</span> 个频道</span>
+    <input class="field" id="outdir" placeholder="保存目录">
+    <input class="field" id="fname" value="直播源.m3u">
+    <button class="btn" id="btnBrowse">选目录</button>
+    <button class="btn" id="btnFolder">打开目录</button>
+    <button class="btn primary" id="btnSave">保存 M3U</button>
+  </div>
+</footer>
+
+<!-- 设置 -->
+<div class="mask" id="cfgMask">
+  <div class="dlg">
+    <div class="dhead"><b>设置</b><span class="spacer"></span>
+      <button class="btn" id="btnCfgX">关闭</button></div>
+    <div class="dbody">
+      <div class="sec">
+        <h4>更新</h4>
+        <div class="grid2">
+          <div class="f">自动更新间隔（小时）<input type="number" id="c_int" min="1" max="72"></div>
+          <div class="f">每个频道备用源数量<input type="number" id="c_bak" min="1" max="8"></div>
+    <div class="f">最低码率 Mbps（低于此值当假的，0=不限）
+      <input type="number" id="c_min" min="0" max="50" step="0.5"></div>
+          <div class="f">EPG 节目单地址（可留空）<input type="text" id="c_epg" placeholder="http://…/epg.xml"></div>
+          <div class="f">保存位置<input type="text" id="c_out" placeholder="M3U 输出路径"></div>
+        </div>
+        <div class="grid2" style="margin-top:10px">
+          <label class="f ck"><input type="checkbox" id="c_sd">保留标清频道</label>
+          <label class="f ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
+          <label class="f ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
+          <label class="f ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>程序</h4>
+        <div class="grid2">
+          <label class="f ck"><input type="checkbox" id="c_tray">显示右下角托盘图标</label>
+          <label class="f ck"><input type="checkbox" id="c_auto">开机自动启动</label>
+          <label class="f ck"><input type="checkbox" id="c_task">按间隔用计划任务后台更新</label>
+          <label class="f ck"><input type="checkbox" id="c_su">检查程序新版本</label>
+          <label class="f ck"><input type="checkbox" id="c_sig">升级包必须验签（推荐）</label>
+          <label class="f ck"><input type="checkbox" id="c_suauto">发现新版本自动下载</label>
+        </div>
+        <div class="grid2" style="margin-top:10px">
+          <div class="f">升级源地址（version.json）<input type="text" id="c_url" placeholder="https://…/version.json"></div>
+          <div class="f">检查间隔（小时）<input type="number" id="c_suh" min="1" max="720"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="btnSelfCheck">检查更新</button>
+          <span class="hint" id="selfMsg">当前版本 <b id="c_cur">-</b></span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>数据源（绿=可用，数字=抓到的条目）</h4>
+        <div class="srcs" id="c_srcs"></div>
+        <div class="hint" style="margin-top:8px">改完点「保存设置」；关掉的源下次更新就不再抓。</div>
+      </div>
+    </div>
+    <div class="dfoot">
+      <button class="btn" id="btnCfgCancel">取消</button>
+      <button class="btn primary" id="btnCfgSave">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 退出确认 -->
+<div class="mask" id="quitMask">
+  <div class="dlg sm">
+    <div class="dhead"><b>退出程序？</b></div>
+    <div class="dbody hint">退出后网页控制台就打不开了，已保存的 M3U 文件和频道数据都会保留。<br>下次双击图标即可重新启动。</div>
+    <div class="dfoot">
+      <button class="btn" id="btnQuitNo">取消</button>
+      <button class="btn primary" id="btnQuitYes">退出程序</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script>
+"use strict";
+var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="speed", lastLoaded="", timer=null, dirty=false;
+var fresh=false, wasUpdating=false;   // fresh=本次打开后跑完过一轮更新，才把频道列出来
+var GORDER=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+var $=function(id){return document.getElementById(id)};
+
+function toast(msg,ms){
+  var t=$("toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._t); t._t=setTimeout(function(){t.classList.remove("show")}, ms||2600);
+}
+function saveSel(){
+  try{localStorage.setItem("livesel", JSON.stringify([].concat(Array.from(sel))));}catch(e){}
+}
+function loadSel(){
+  try{ var a=JSON.parse(localStorage.getItem("livesel")||"null"); if(a&&a.length){sel=new Set(a);return true;} }catch(e){}
+  return false;
+}
+// 主题跟随系统
+function applyTheme(){
+  var d=window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme=d?"dark":"light";
+}
+if(window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",applyTheme);
+applyTheme();
+
+function spd(c){
+  var s=c.best||{}, r=s.res||0, m=s.mbps||0;
+  if(r>=2000) return "4K";
+  if(r>=1000) return "1080P";
+  if(r>=620) return "HD";
+  return c.quality||"";
+}
+function tagCls(c){
+  var r=((c.best||{}).res)||0;
+  if(r>=2000) return "tag q4";
+  if(r>=1000) return "tag q3";
+  if(r>=620) return "tag q2";
+  return "tag";
+}
+function host(u){ try{ return new URL(u).host; }catch(e){ return u||"" } }
+function isHkmt(c){ return ["香港","澳门","台湾"].indexOf(c.group)>=0 }
+
+function gidx(g){ var i=GORDER.indexOf(g); return i<0?90:i }
+function mb(c){ return ((c.best||{}).mbps)||0 }
+function filtered(){
+  var kw=q.trim().toLowerCase();
+  var list=CH.filter(function(c){
+    if(grp && c.group!==grp) return false;
+    if(qf && spd(c)!==qf) return false;
+    if(qk==="hkmt" && !isHkmt(c)) return false;
+    if(qk==="alive" && !(c.best&&c.best.live)) return false;
+    if(kw && (c.name||"").toLowerCase().indexOf(kw)<0) return false;
+    return true;
+  });
+  list.sort(function(a,b){
+    if(sk==="speed"){
+      var d=mb(b)-mb(a);
+      if(d) return d;                 // 实测快的排前面
+    }
+    if(sk==="speed"||sk==="group"){
+      var g=gidx(a.group)-gidx(b.group);
+      if(g) return g;
+    }
+    return (a.name||"").localeCompare(b.name||"","zh");
+  });
+  return list;
+}
+
+function renderChips(){
+  var gs=[], seen={};
+  CH.forEach(function(c){ if(!seen[c.group]){seen[c.group]=1;gs.push(c.group)} });
+  var order=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+  gs.sort(function(a,b){
+    var ia=order.indexOf(a), ib=order.indexOf(b);
+    return (ia<0?99:ia)-(ib<0?99:ib);
+  });
+  var html='<button class="chip'+(grp?"":" on")+'" data-g="">全部</button>';
+  gs.forEach(function(g){
+    var n=CH.filter(function(c){return c.group===g}).length;
+    html+='<button class="chip'+(grp===g?" on":"")+'" data-g="'+esc(g)+'">'+esc(g)+' '+n+'</button>';
+  });
+  $("chips").innerHTML=html;
+}
+function esc(s){
+  return String(s==null?"":s).replace(/[&<>"']/g,function(m){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];
+  });
+}
+function renderQ(){
+  [].forEach.call($("chipsQ").querySelectorAll(".chip"),function(b){
+    var on = b.dataset.q ? (qf===b.dataset.q) : (qk===b.dataset.qk);
+    b.classList.toggle("on", !!on);
+  });
+}
+
+function renderRows(){
+  var list=filtered(), rows=$("rows");
+  if(!CH.length){
+    rows.innerHTML='<div class="empty">还没有频道。<br>点右上角「立即更新」，跑完（约 1~2 分钟）就会把实测可用的频道列在这里。</div>';
+    updCount(); return;
+  }
+  if(!list.length){ rows.innerHTML='<div class="empty">没有符合条件的频道。清空搜索或切回「全部」看看。</div>'; updCount(); return; }
+  var html="";
+  list.forEach(function(c){
+    var alive=c.best&&c.best.live;
+    var n=(c.sources||[]).length;
+    html+='<div class="tr'+(alive?"":" dead")+'" data-k="'+esc(c.key)+'">'
+      +'<div><input type="checkbox" data-ck="'+esc(c.key)+'"'+(sel.has(c.key)?" checked":"")+'></div>'
+      +'<div class="nm"><img loading="lazy" src="'+esc(c.logo||"")+'" onerror="this.style.visibility=\'hidden\'">'
+      +'<span class="t">'+esc(c.name)+'</span>'+(n>1?'<span class="nsrc">'+n+' 源</span>':'')+'</div>'
+      +'<div class="grp">'+esc(c.group)+'</div>'
+      +'<div class="qa"><span class="'+tagCls(c)+'">'+esc(spd(c)||"未知")+'</span>'
+      +'<span class="spd">'+(alive?(c.best.mbps?(c.best.mbps.toFixed(1)+" Mbps"):"可用"):"不可用")+'</span></div>'
+      +'<div class="host"><span class="h">'+esc(alive?host(c.best.url).split(":")[0]:"—")+'</span>'
+      +((alive&&c.best.mbps&&c.best.mbps<2)?'<span class="lowb" title="码率不到 2 Mbps，多半是压缩转发源，画面不一定是这个台">低码率</span>':'')
+      +'</div>'
+      +'</div>';
+  });
+  rows.innerHTML=html;
+  updCount();
+}
+
+function updCount(){
+  var list=filtered(), n=0;
+  list.forEach(function(c){ if(sel.has(c.key)) n++ });
+  $("selN").textContent=n;
+  $("selT").textContent=list.length;
+  var all=list.length>0 && n===list.length;
+  var ck=$("ckAll"); ck.checked=all; ck.indeterminate=(n>0&&!all);
+  var bs=$("btnSave"); if(bs){ bs.disabled = n===0; bs.title = n? "保存已勾选的频道" : "先勾选要保存的频道"; }
+}
+
+function loadChannels(){
+  fetch("/api/channels").then(function(r){return r.json()}).then(function(d){
+    CH=d.channels||[];
+    sel=new Set();          // 每次打开都从"一个都不勾"开始，由用户自己挑；也不继承上次的勾选
+    selLoaded=true;
+    if(d.save_dir && !$("outdir").value) $("outdir").value=d.save_dir;
+    renderChips(); renderRows();
+    dirty=true;
+  }).catch(function(){ toast("读取频道失败，稍后重试") });
+}
+var selLoaded=false;
+function loadSelSilent(){
+  if(selLoaded) return true;
+  selLoaded=true;
+  return loadSel();
+}
+
+function loadStatus(){
+  fetch("/api/status").then(function(r){return r.json()}).then(function(s){
+    VERSION=s.version; $("verPill").textContent="v"+s.version;
+    // 保存目录一开始就填好（默认在桌面），别让用户看到空框再以为是别的盘
+    if(s.desktop) DESKTOP=s.desktop;
+    if(s.save_path && !$("outdir").value){
+      var sp=String(s.save_path), i=Math.max(sp.lastIndexOf("\\"), sp.lastIndexOf("/"));
+      if(i>0) $("outdir").value=sp.slice(0,i);
+    }
+    var dot=$("stDot"), txt=$("stTxt");
+    if(s.updating){
+      dot.className="ti run"; txt.textContent=s.phase||"更新中";
+      $("progwrap").classList.add("show");
+      var p=s.total?Math.round(s.done*100/s.total):3;
+      $("prog").style.width=Math.max(3,Math.min(100,p))+"%";
+      $("btnUpdate").disabled=true;
+    }else{
+      dot.className="ti"; txt.textContent="就绪";
+      $("progwrap").classList.remove("show"); $("prog").style.width="0";
+      $("btnUpdate").disabled=false;
+      if(s.error){ dot.className="ti off"; txt.textContent="上次更新失败"; }
+    }
+    if(s.stats){
+      $("sChan").textContent=s.stats.live||0;
+      $("sSrc").textContent=s.stats.channels||0;
+      $("sHkmt").textContent=s.stats.hkmt||0;
+    }
+    $("sTime").textContent=friendly(s.last_update);
+    if(s.tray===false && !window._trayWarn){ window._trayWarn=1; }
+    // 打开页面时不要直接铺出上次缓存的结果：必须是这一轮跑完，才把实测结果列出来
+    if(s.updating){ wasUpdating=true; }
+    if(!s.updating && wasUpdating){
+      wasUpdating=false; fresh=true; lastLoaded=s.last_update||"";
+      loadChannels();
+      toast("更新完成："+(s.stats&&s.stats.live||0)+" 个频道实测可用");
+    }
+  }).catch(function(){});
+}
+function friendly(t){
+  if(!t) return "-";
+  var d=new Date(String(t).replace(" ","T"));
+  if(isNaN(d.getTime())) return t;
+  var diff=(Date.now()-d.getTime())/60000;
+  if(diff<1) return "刚刚";
+  if(diff<60) return Math.round(diff)+" 分钟前";
+  if(diff<1440) return Math.round(diff/60)+" 小时前";
+  return (d.getMonth()+1)+"/"+d.getDate()+" "+("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+}
+
+/* ---- 交互 ---- */
+$("q").addEventListener("input",function(){ q=this.value; renderRows() });
+try{ var _sk=localStorage.getItem("livesort"); if(_sk) sk=_sk }catch(e){}
+$("sort").value=sk;
+$("sort").addEventListener("change",function(){ sk=this.value; try{localStorage.setItem("livesort",sk)}catch(e){}; renderRows() });
+$("chips").addEventListener("click",function(e){
+  var b=e.target.closest(".chip"); if(!b) return;
+  grp=b.dataset.g||""; renderChips(); renderRows();
+});
+$("chipsQ").addEventListener("click",function(e){
+  var b=e.target.closest(".chip"); if(!b) return;
+  if(b.dataset.q){ qf=(qf===b.dataset.q)?"":b.dataset.q; qk=""; }
+  else { qk=(qk===b.dataset.qk)?"":b.dataset.qk; qf=""; }
+  renderQ(); renderRows();
+});
+$("rows").addEventListener("click",function(e){
+  var ck=e.target.closest("input[data-ck]"); if(!ck) return;
+  var k=ck.dataset.ck;
+  if(ck.checked) sel.add(k); else sel.delete(k);
+  saveSel(); updCount();
+  var tr=ck.closest(".tr"); if(tr) tr.style.background="";
+});
+$("ckAll").addEventListener("change",function(){
+  var list=filtered();
+  if(this.checked) list.forEach(function(c){sel.add(c.key)});
+  else list.forEach(function(c){sel.delete(c.key)});
+  saveSel(); renderRows();
+});
+$("btnAll").addEventListener("click",function(){
+  filtered().forEach(function(c){sel.add(c.key)}); saveSel(); renderRows();
+});
+$("btnInv").addEventListener("click",function(){
+  filtered().forEach(function(c){ if(sel.has(c.key)) sel.delete(c.key); else sel.add(c.key) });
+  saveSel(); renderRows();
+});
+$("btnUpdate").addEventListener("click",function(){
+  var b=this; b.disabled=true; b.textContent="更新中…";
+  CH=[]; sel=new Set(); fresh=false; wasUpdating=false; renderChips(); renderRows();
+  fetch("/api/update",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    if(!d.ok) toast(d.msg||"更新启动失败");
+    else toast("已开始更新：抓取源 → 测速 → 挑最佳源，请稍候");
+  }).catch(function(){toast("请求失败")}).then(function(){
+    setTimeout(function(){b.textContent="立即更新";},1500);
+  });
+});
+$("btnSave").addEventListener("click",function(){
+  var keys=Array.from(sel), dir=$("outdir").value.trim(), fn=$("fname").value.trim()||"直播源.m3u";
+  if(!keys.length) return toast("还没有选频道：勾选几个，或点「全选」");
+  if(!dir) return toast("请先填保存目录（或点「选目录」）");
+  var b=this; b.disabled=true;
+  fetch("/api/export",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({keys:keys,dir:dir,filename:fn})})
+    .then(function(r){return r.json()}).then(function(d){
+      b.disabled=false;
+      if(!d.ok) return toast(d.msg||"保存失败");
+      var m="已保存 "+d.count+" 个频道到 "+d.path;
+      if(d.skipped) m+="（"+d.skipped+" 个频道当前没有可用源，已跳过）";
+      toast(m,4200);
+    }).catch(function(){ b.disabled=false; toast("保存请求失败") });
+});
+$("btnBrowse").addEventListener("click",function(){
+  fetch("/api/pickdir",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    if(d.path) $("outdir").value=d.path;
+  }).catch(function(){toast("打开目录选择框失败")});
+});
+$("btnFolder").addEventListener("click",function(){
+  var d=$("outdir").value.trim();
+  if(!d) return toast("先填目录");
+  fetch("/api/open",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:d})})
+    .then(function(){toast("已打开目录")}).catch(function(){toast("打开失败")});
+});
+
+/* ---- 设置 ---- */
+var SRCS=[];
+function openCfg(){
+  fetch("/api/settings").then(function(r){return r.json()}).then(function(c){
+    $("c_int").value=c.interval_hours; $("c_bak").value=c.backups;
+    $("c_epg").value=c.epg_url||""; $("c_out").value=c.output_path||"";
+    $("c_sd").checked=!!c.keep_sd; $("c_browser").checked=!!c.open_browser;
+    $("c_junk").checked=c.filter_junk!==false;
+    $("c_tv").checked=c.only_tv!==false;
+    $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
+    $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
+    $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
+    $("c_suauto").checked=!!c.update_auto; $("c_url").value=c.update_url||"";
+    $("c_suh").value=c.update_check_hours||24; $("c_cur").textContent=VERSION;
+    // 数据源列表按"该用的在前、建议关/已关的在后"排，别让直播间源占着第一屏
+    SRCS=(c.source_list||[]).slice().sort(function(a,b){
+      var d=(a.def_on?0:1)-(b.def_on?0:1); if(d) return d;
+      return ((c.sources[a.key]?0:1)-(c.sources[b.key]?0:1));
+    });
+    fetch("/api/status").then(function(r){return r.json()}).then(function(s){
+      var st=s.source_stats||{};
+      $("c_srcs").innerHTML=SRCS.map(function(x){
+        var e=st[x.key];
+        var col=!e?"var(--sub)":(e.ok?"var(--ok)":"var(--bad)");
+        var meta=!e?"未抓取":(e.ok?("<b>"+e.count+"</b> 条 · "+e.ms+"ms"+(e.fallback?" · 备选":"")+""):"抓取失败");
+        var offc=c.sources[x.key]?"":" off";
+        return '<label class="src'+offc+'"><input type="checkbox" data-src="'+esc(x.key)+'"'+(c.sources[x.key]?" checked":"")+'>'
+          +'<i class="st" style="background:'+col+'"></i><span class="n">'+esc(x.name)+'</span>'
+          +'<span class="m">'+meta+'</span></label>';
+      }).join("");
+      $("cfgMask").classList.add("show");
+    });
+  }).catch(function(){toast("读取设置失败")});
+}
+var VERSION="-", DESKTOP="";
+function useDesktop(){ if(!DESKTOP){ toast("还没拿到桌面路径，稍等一秒再点"); return } $("outdir").value=DESKTOP; }
+function closeCfg(){ $("cfgMask").classList.remove("show") }
+$("btnCfg").addEventListener("click",openCfg);
+$("btnCfgX").addEventListener("click",closeCfg);
+$("btnCfgCancel").addEventListener("click",closeCfg);
+$("cfgMask").addEventListener("click",function(e){ if(e.target===this) closeCfg() });
+$("btnCfgSave").addEventListener("click",function(){
+  var srcs={};
+  [].forEach.call(document.querySelectorAll("[data-src]"),function(x){ srcs[x.dataset.src]=x.checked });
+  var body={
+    interval_hours:+$("c_int").value, backups:+$("c_bak").value,
+    keep_sd:$("c_sd").checked, filter_junk:$("c_junk").checked, only_tv:$("c_tv").checked,
+    min_mbps:(parseFloat($("c_min").value)||0),
+    output_path:$("c_out").value.trim(),
+    epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
+    tray:$("c_tray").checked, autostart:$("c_auto").checked, task_registered:$("c_task").checked,
+    self_update:$("c_su").checked, require_sig:$("c_sig").checked, update_auto:$("c_suauto").checked,
+    update_url:$("c_url").value.trim(), update_check_hours:+$("c_suh").value, sources:srcs
+  };
+  fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+    .then(function(r){return r.json()}).then(function(d){
+      if(d.ok){ toast("设置已保存，新的更新间隔从下次开始生效"); closeCfg(); loadStatus(); }
+      else toast(d.msg||"保存失败");
+    }).catch(function(){toast("保存失败")});
+});
+$("btnSelfCheck").addEventListener("click",function(){
+  var b=this; b.disabled=true;
+  $("selfMsg").textContent="正在检查…";
+  fetch("/api/selfcheck").then(function(r){return r.json()}).then(function(d){
+    b.disabled=false;
+    if(d.latest && d.latest.version){
+      $("selfMsg").innerHTML='发现新版本 <b>v'+esc(d.latest.version)+'</b> <button class="btn" id="btnDoUpd">下载并升级</button>';
+      $("btnDoUpd").onclick=function(){
+        this.disabled=true; this.textContent="下载中…";
+        fetch("/api/selfupdate",{method:"POST"}).then(function(r){return r.json()}).then(function(x){
+          toast(x.msg||(x.ok?"已开始升级":"升级失败"),5000);
+        });
+      };
+    }else if(d.latest===false){ $("selfMsg").textContent="已是最新版本 v"+d.current; }
+    else { $("selfMsg").textContent=d.msg||"检查失败（没配置升级源或网络不通）"; }
+  }).catch(function(){ b.disabled=false; $("selfMsg").textContent="检查失败" });
+});
+
+/* ---- 退出 ---- */
+$("btnQuit").addEventListener("click",function(){ $("quitMask").classList.add("show") });
+$("btnQuitNo").addEventListener("click",function(){ $("quitMask").classList.remove("show") });
+$("btnQuitYes").addEventListener("click",function(){
+  var b=this; b.disabled=true; b.textContent="正在退出…";
+  fetch("/api/quit",{method:"POST"}).then(function(){
+    document.body.innerHTML='<div style="height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:#6b7280;font:14px system-ui"><b style="font-size:18px;color:#1b1f24">LIVE直播源 已退出</b><span>可以关闭这个页面了</span></div>';
+  }).catch(function(){
+    document.body.innerHTML='<div style="padding:40px;text-align:center;color:#6b7280">已退出（或后台正在关闭），可以关闭这个页面了。</div>';
+  });
+});
+
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){ closeCfg(); $("quitMask").classList.remove("show") }
+  if((e.ctrlKey||e.metaKey)&&e.key==="s"){ e.preventDefault(); $("btnSave").click() }
+  if((e.ctrlKey||e.metaKey)&&e.key==="f"){ e.preventDefault(); $("q").focus() }
+});
+
+// 打开页面时只查状态：不铺上次缓存的频道，等用户自己点「立即更新」跑完再列出来
+showEmpty(); loadStatus(); setInterval(loadStatus,2000);
+function showEmpty(){
+  renderChips(); renderRows(); updCount();
+}
+</script>
+
+</html>

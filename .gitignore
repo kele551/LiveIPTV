@@ -1,0 +1,30 @@
+# ---- 运行产物 ----
+config.json
+channels.json
+logos.json
+bad_urls.json
+hosts.json
+*.log
+*.log.old
+直播源.m3u
+*.m3u8
+
+# ---- 构建产物 ----
+build/
+dist/
+builds/
+*.spec
+*.pyc
+__pycache__/
+*.bak
+
+# ---- 签名私钥（只在维护者本机，永不入库） ----
+*.key
+*.pem
+secrets/
+.env
+
+# ---- 系统垃圾 ----
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,83 @@
+name: 🐞 报告问题（Bug report）
+description: 列表里少了台、检测不出可用源、M3U 打不开、托盘/退出异常等
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。填之前先扫一眼这几条，能省一轮来回：
+
+        - **先说清楚是"哪个台"**：频道名 + 分组（例如「凤凰中文 / 香港」）；能贴出首选源域名更好。
+        - **日志最有价值**：`%APPDATA%\LIVE直播源\LIVE直播源.log` 的最后几十行。
+        - **程序版本**：控制台标题旁边就有（`v1.3.0`），或右键 exe → 属性 → 详细信息。
+        - **不要贴出自己宽带的公网 IP、账号之类**；本程序只在本机运行，日志里也不会出现这些。
+        - **安全问题不要发在这里**：按 [SECURITY.md](https://github.com/kele551/LiveIPTV/blob/main/docs/SECURITY.md) 私下报告。
+
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本号
+      description: 控制台标题旁，或右键 exe → 属性 → 详细信息
+      placeholder: "v1.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 版本
+      description: 设置 → 系统 → 关于，例如「Windows 10 专业版 22H2（19045）」
+      placeholder: "Windows 10 专业版 22H2（19045）"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: playing
+    attributes:
+      label: 用什么播放器打开 M3U
+      description: 同一个源，不同播放器表现可能不一样（VLC / PotPlayer / 电视台自己的客户端等）
+      options:
+        - VLC
+        - PotPlayer
+        - MPC-HC / MPC-BE
+        - mpv
+        - 其它播放器（请在下面补充）
+        - 还没打开过，只是列表里看着不对
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 频道列表里缺台 / 多出不是电视台的频道
+        - 「实测可用」判错了（能播的判成不可用，或反过来）
+        - 港/澳/台、央视、卫视、地方台分错组
+        - 保存 M3U 之后播放器打不开、没有画面
+        - 图标 / 托盘 / 菜单 / 提示卡片不对
+        - 自动更新、开机自启、计划任务不生效
+        - 其它（下面说明）
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 具体现象
+      description: 什么时候开始、点了什么、期望看到什么、实际看到什么
+      placeholder: |
+        例：点「立即更新」跑完后，选「凤凰中文」保存 M3U，用 VLCD 打开提示无法打开。
+        首选源是 183.239.108.37:1698。
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 日志尾部（可选但很有用）
+      description: "%APPDATA%\\LIVE直播源\\LIVE直播源.log 最后 30~50 行"
+      render: text
+    validations:
+      required: false

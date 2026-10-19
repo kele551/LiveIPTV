@@ -1,0 +1,14 @@
+# Issue 模板选择页的配置。
+# 关掉"空白 Issue"：走模板能把版本号、Windows 版本、用的播放器一次问清，省掉一两轮来回。
+blank_issues_enabled: false
+
+contact_links:
+  - name: 🔐 报告安全问题（请勿公开）
+    url: https://github.com/kele551/LiveIPTV/blob/main/docs/SECURITY.md
+    about: 疑似漏洞、升级包被篡改、签名校验异常等，请按 docs/SECURITY.md 私下报告，不要开公开 Issue。
+  - name: 📖 使用说明与已知边界
+    url: https://github.com/kele551/LiveIPTV#常见问题
+    about: 为什么某个台找不到、为什么显示的速度和实际不一样、为什么港台有的播不了——先看 README。
+  - name: 🛠 参与贡献（CONTRIBUTING）
+    url: https://github.com/kele551/LiveIPTV/blob/main/docs/CONTRIBUTING.md
+    about: 想提 PR 或从源码构建，先看这份：流程、代码风格、本地自查、提交信息规范。

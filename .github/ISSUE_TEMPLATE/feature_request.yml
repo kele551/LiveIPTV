@@ -1,0 +1,43 @@
+name: 💡 功能建议（Feature request）
+description: 想加个筛选项、想支持新的直播源、想改界面
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提之前先看一眼 README 的「这是什么」「数据源与实测可信度」两节，
+        有些"想要的"其实已经有了（比如按码率过滤、只保留电视台、最快优先排序）。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 属于哪一块
+      options:
+        - 频道列表与筛选（分组、画质、码率、搜索、排序）
+        - 直播源（新增来源、源的质量判断）
+        - 导出 M3U（格式、命名、目录、播放器兼容）
+        - 界面外观（布局、图标、配色）
+        - 托盘、提示、开机自启、定时更新
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: want
+    attributes:
+      label: 你希望它怎么用
+      description: 用"我要做某件事的时候，希望点哪里、看到什么"来描述，比"加个某某功能"清楚得多
+      placeholder: |
+        例：我想只导出 1080P 以上的台，现在得一个个翻画质列。
+        希望工具栏有个「只要高清」的开关，打开后列表和导出的 M3U 都只留高清。
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么需要它
+      description: 现在这么做哪里难受、多花多少时间
+    validations:
+      required: false
