@@ -1,7 +1,1 @@
-{
-  "version": "1.3.0",
-  "url": "https://github.com/kele551/LiveIPTV/releases/download/v1.3.0/LiveIPTV.exe",
-  "notes": "修正：首次使用的合规提示条点「我已了解」后不会消失",
-  "sha256": "c450cc742113add24ccd857c135edabcb6e9bd26c8b61f36f191b5448f62f582",
-  "size": 8650191
-}
+{"version":"1.3.0","url":"https://github.com/kele551/LiveIPTV/releases/download/v1.3.0/LiveIPTV.exe","notes":"只留电视台；频道按常用度排序(CCTV1-17 顺序排)；默认隐藏地级台；真实码率测速；导出 M3U","sha256":"65f52293a64f3a62a6d314b8a7dd061ede5cc1086b0f4d7d995932fe64e9bdb3","size":8660692}

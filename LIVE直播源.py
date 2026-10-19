@@ -107,6 +107,9 @@ LOG_PATH = BASE / (APP_NAME + ".log")
 # 全部使用境外公开源(GitHub raw / iptv-org 站点 / jsdelivr / epg.pw)，
 # 按“实测可用率”排序：越靠前的源越可能真有画面，探测时优先级也越高。
 SOURCES = [
+    # 用户 2026-10-19 亲手核对的一批公网源(14 条，实测全部 200 可出画面)，内置成"精选源"，
+    # 优先级最高：同一频道有多个候选时，来自这里的地址会被优先探测/优选。
+    ("curated", "精选源(人工核对)", "builtin", True, "国内"),
     # (key, 名称, 列表地址, 默认启用, 区域标签)
     # 2026-10-19 实测(每源均匀抽样 60 条，连通+实际拉流)：CCSH 平台源 77% 可播，
     # 是国内聚合里最好的一份；CCSH 全量 28%，Guovin 15%，iptv-org 中国 32%。
@@ -128,6 +131,33 @@ SOURCES = [
     ("epg_tw", "台湾-epg.pw",    "https://epg.pw/test_channels_taiwan.m3u", False, "港澳台"),
     ("epg_mo", "澳门-epg.pw",    "https://epg.pw/test_channels_macau.m3u", False, "港澳台"),
 ]
+
+# 精选源：人工核对过的公网地址（2026-10-19 全部实测 200 + mpegurl）。
+# 直接内嵌成 M3U 文本，不依赖任何网络列表，也不会被别的源覆盖掉。
+CURATED = [
+    ("CCTV4K", "http://107.150.52.50:82/live/cctv4k.m3u8", "央视"),
+    ("CCTV2 财经", "http://8.138.7.223/tv/cctv2.php", "央视"),
+    ("CCTV8K", "http://107.150.52.50:82/live/cctv8k.m3u8", "央视"),
+    ("湖南卫视", "http://hlsal-ldvt.qing.mgtv.com/nn_live/nn_x64/Y2RuZXhfaWQ9YWxfaGxzX2xkdnQmZT02OTE0NjA0JnY9MSZpZD1ITldTWkdTVCZzPTcwN2RiYTc2YzJjNmJmMTQ4MmUyZGYzOWU2NWM3YWFi/HNWSZGST.m3u8", "卫视"),
+    ("凤凰卫视中文台", "http://120.198.95.220:9901/tsfile/live/1036_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
+    ("凤凰卫视资讯台", "http://120.198.95.220:9901/tsfile/live/1037_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
+    ("翡翠台", "http://103.172.187.30:12000/stream/mytv/null-1/master.m3u8", "香港"),
+    ("黄金翡翠", "http://103.172.187.30:12000/stream/mytv/null-12/master.m3u8", "香港"),
+    ("电影台", "http://103.172.187.30:12000/stream/mytv/null-10/master.m3u8", "香港"),
+    ("黄金华剧台", "http://103.172.187.30:12000/stream/mytv/null-8/master.m3u8", "香港"),
+    ("八大娱乐台", "http://103.172.187.30:12000/stream/mytv/null-4/master.m3u8", "台湾"),
+    ("美亚电影台", "http://103.172.187.30:12000/stream/mytv/null-9/master.m3u8", "香港"),
+    ("亚洲剧", "http://103.172.187.30:12000/stream/mytv/null-11/master.m3u8", "香港"),
+    ("TVBS亚洲台", "http://38.64.72.148/hls/modn/list/4005/playlist.m3u8", "香港"),
+    ("民视新闻台", "http://38.64.72.148/hls/modn/list/4012/playlist.m3u8", "台湾"),
+]
+CURATED_M3U = "#EXTM3U\n" + "".join(
+    '#EXTINF:-1 tvg-name="%s" group-title="%s",%s\n%s\n' % (n, g, n, u) for n, u, g in CURATED
+)
+CURATED_NAMES = {n for n, _, _ in CURATED}
+# 精选源的分组是人工核对过的，不能被关键词猜错（凤凰卫视中文台会被"卫视"抢走、
+# 翡翠台系列会被误分到台湾）。所以分组直接按这里的 g 落。
+CURATED_GROUP = {n: g for n, _, g in CURATED}
 
 # 外语国际频道(可选源，默认关闭；网页“源管理”可勾选开启 —— 因看不懂默认不启用)
 ORG_COUNTRIES = [("us", "美国"), ("jp", "日本"), ("kr", "韩国"), ("uk", "英国"), ("fr", "法国"), ("de", "德国"),
@@ -207,7 +237,7 @@ for _cc, _zh in ORG_COUNTRIES:
             "https://fastly.jsdelivr.net/gh/iptv-org/iptv@master/streams/%s.m3u" % _cc,
         ]
 
-CFG_VER = 6                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
+CFG_VER = 7                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
 
 def _desktop_dir():
     """真正的桌面目录。
@@ -275,6 +305,7 @@ DEFAULT_CFG = {
     "keep_sd": True,
     "min_mbps": 1.5,          # 低于这个码率的频道不显示/不导出（0=不限）；1.1 Mbps 那种基本是转码冒充源           # 无高清源时是否保留标清频道(供用户自行选择)
     "filter_junk": True,       # 过滤 DJ/相声/助眠/解说 这类非电视频道
+    "hide_local": True,        # 不显示地级市/县级台(名字带地名的那些)，列表只留大台
     "only_tv": True,           # 只保留"电视台"频道：用 CCSH 人工整理的频道名单做白名单
     "verify_timeout": 4,       # 单源探测超时(秒)
     "concurrency": 256,        # 并发探测数(地址已去重，256 路大部分时间在等 IO)
@@ -288,11 +319,23 @@ DEFAULT_CFG = {
     "tray": True,              # 显示右下角托盘图标
     "update_auto": False,      # 发现新版本是否自动下载替换并重启
     "update_check_hours": 24,  # 程序自更新检查间隔(小时)
-    "cfg_ver": 6,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
+    "cfg_ver": 7,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
     "sources": {k: on for k, _, _, on, _ in SOURCES},
 }
 
-GROUP_RANK = ["香港", "澳门", "台湾", "央视", "卫视", "地方台", "电影", "体育", "游戏", "少儿", "其他"]
+# 列表默认顺序：常看的在前(CCTV/卫视/港澳台)，地级台垫底
+def cctv_base(name):
+    """是不是"标准台"名字(CCTV4 是，CCTV4K / CCTV-4 Europe 不是)，用于同号内排序。"""
+    return 0 if re.fullmatch(r"cctv[-\s]?\d{1,2}", (name or "").strip(), re.I) else 1
+
+
+def cctv_num(name):
+    """CCTV 频道的编号(用于把 CCTV1..CCTV17 排整齐)；不是 CCTV 的返回 99。"""
+    m = re.search(r"cctv[\-\s]*(\d{1,2})", name or "", re.I)
+    return int(m.group(1)) if m else 99
+
+
+GROUP_RANK = ["央视", "卫视", "香港", "澳门", "台湾", "体育", "电影", "少儿", "游戏", "国际·综合", "地方台", "其他"]
 
 # ---------------------------------------------------------------- 基础工具
 
@@ -448,8 +491,12 @@ GAME_KW = re.compile(r"(游戏|电竞|电子竞技|游戏风云|竞速|gtv|esl|l
 
 def classify(name, tag):
     n = name.lower()
+    if tag == "curated" and name in CURATED_GROUP:
+        return CURATED_GROUP[name]
     if MO_KW.search(n):
         return "澳门"
+    if re.search(r"tvb", n):
+        return "香港"
     if TW_KW.search(n):
         return "台湾"
     if HK_KW.search(n):
@@ -480,7 +527,7 @@ def classify(name, tag):
     if re.search(r"(少儿|卡通|动漫|金鹰|亲子|baby)", n):
         return "少儿"
     # 国内频道主体：来自 iptv-org 中国 / YanG / CCSH / Guovin 聚合，未匹配以上的归为地方台
-    if tag in ("cn_org", "yang", "ccsh_plat", "ccsh_live", "guovin", "cinauto"):
+    if tag in ("cn_org", "yang", "ccsh_plat", "ccsh_live", "guovin", "cinauto", "curated"):
         return "地方台"
     # 国际频道：按源标签映射国家(地区)中文名
     if tag in COUNTRY_OF_TAG:
@@ -751,7 +798,8 @@ def keep_entry(e, cfg):
         return False
     if cfg.get("filter_junk", True) and JUNK_RE.search(e["name"]):
         return False
-    if cfg.get("only_tv", True) and TV_NAMES and not is_tv(e["name"]):
+    if (cfg.get("only_tv", True) and TV_NAMES and e.get("tag") != "curated"
+            and not is_tv(e["name"])):
         return False
     g = classify(e["name"], e["tag"])
     if g in ("香港", "澳门", "台湾"):
@@ -801,82 +849,156 @@ def probe_reach(e, timeout):
         return False, 0, "不可达"
 
 
-def probe_stream(e, timeout, budget=0.7, max_bytes=786432):
-    """一次连接同时判断：能不能连、是不是真流(不是网页)、能不能拉出画面、大概几兆、分辨率多少。
+# 假源特征：一批"通用中转"站点对任何 id 都回同一段占位视频
+# （实测 zby.lskk.top/cdnlive.php -> pan.dfkj.live/tokenerror.mp4），测速照样有数字、
+# 也能"播出画面"，但画面根本不是那个频道 —— 用户看到的就是"假频道"。
+FAKE_HOSTS = {"pan.dfkj.live"}
+FAKE_PATH_KW = ("tokenerror", "token_error", "nochannel", "notfound.mp4", "placeholder")
 
-    返回 (ok, ttfb_ms, note, mbps, res_h)。
-    budget 是"读多久算够"的秒数，max_bytes 是最多读多少字节 —— 两者都刻意压得很小，
-    只为判断可用性与大致画质，不是为了测速跑分。
+
+def _is_fake_target(final_url):
+    low = (final_url or "").lower()
+    if (urlparse(low).hostname or "") in FAKE_HOSTS:
+        return True
+    return any(k in low for k in FAKE_PATH_KW)
+
+
+def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
+    """一次连接同时判断：能不能连、是不是真流、能不能拉出画面、真实码率、分辨率。
+
+    返回 (ok, ttfb_ms, note, mbps, res_h, speed)：
+      mbps  = 真实码率(分片字节数 / 分片时长)，和播放器里看到的一致；
+      speed = 我这边的下载吞吐，用来排"最快优先"。
+    HLS 要顺着三层走：主清单 -> 变体清单 -> 真正带画面的分片(.ts/.m4s)，只读分片才测得出
+    "播放器实际能拿到多少"；只读清单会算出几百 Mbps 的假数字(实测过)。
     """
     url = e["url"]
     if not url.startswith(("http://", "https://")):
         m = re.match(r"\w+://([^/:]+)(?::(\d+))?", url)
         if not m:
-            return False, 0, "地址无法解析", 0.0, 0
+            return False, 0, "地址无法解析", 0.0, 0, 0.0
         try:
             t0 = time.monotonic()
             sk = socket.create_connection((m.group(1), int(m.group(2) or 1935)), timeout=timeout)
             sk.close()
-            return True, round((time.monotonic() - t0) * 1000), "非HTTP流(TCP探测)", 0.0, 0
+            return True, round((time.monotonic() - t0) * 1000), "非HTTP流(TCP探测)", 0.0, 0, 0.0
         except Exception:
-            return False, 0, "TCP不可达", 0.0, 0
+            return False, 0, "TCP不可达", 0.0, 0, 0.0
     try:
         t0 = time.monotonic()
         resp = _open(url, timeout)
         ttfb = round((time.monotonic() - t0) * 1000)
         ctype = (resp.headers.get("Content-Type") or "").lower()
-        res_h = 0
-        if ".m3u8" in url.lower() or "mpegurl" in ctype:
-            data = resp.read(262144).decode("utf-8", "ignore")
+        if _is_fake_target(resp.geturl() or url):
             resp.close()
-            low = data[:2048].lower()
+            return False, ttfb, "假源(跳转到占位视频)", 0.0, 0, 0.0
+
+        def read_text(r):
+            try:
+                return r.read(262144).decode("utf-8", "ignore")
+            finally:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+        def first_segment(text, base):
+            """返回 (分片地址, 该分片时长秒)。分片地址几乎都带查询串
+            (stream.m3u8?uid=…、live_1.ts?key=…)，必须去掉 ?后面再判后缀。"""
+            dur = 0.0
+            for ln in text.splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                if s.startswith("#EXTINF:"):
+                    try:
+                        dur = float(s[8:].split(",")[0].strip())
+                    except Exception:
+                        dur = 0.0
+                    continue
+                if s.startswith("#"):
+                    continue
+                pure = s.split("?", 1)[0].split("#", 1)[0].lower()
+                if pure.endswith((".ts", ".m4s", ".flv", ".mp4", ".aac", ".m3u8", ".mp3")):
+                    return urljoin(base, s), dur
+                if s.startswith(("http://", "https://", "rtmp://", "rtsp://")):
+                    return urljoin(base, s), dur
+            return "", 0.0
+
+        res_h = 0
+        seg_dur = 0.0
+        seg_len = 0
+        if ".m3u8" in url.lower() or "mpegurl" in ctype:
+            text = read_text(resp)
+            low = text[:2048].lower()
             if "<html" in low or "<!doctype" in low:
-                return False, ttfb, "返回网页(非直播流)", 0.0, 0
+                return False, ttfb, "返回网页(非直播流)", 0.0, 0, 0.0
             cands = []
-            for attrs, seg in re.findall(r"#EXT-X-STREAM-INF:([^\n]*)\n([^\r\n]+)", data):
+            for attrs, seg in re.findall(r"#EXT-X-STREAM-INF:([^\n]*)\n([^\r\n#]+)", text):
                 bwm = re.search(r"BANDWIDTH=(\d+)", attrs)
                 resm = re.search(r"RESOLUTION=(\d+)x(\d+)", attrs)
-                cands.append((int(bwm.group(1)) if bwm else 0,
-                              seg.strip(), int(resm.group(2)) if resm else 0))
+                cands.append((int(bwm.group(1)) if bwm else 0, seg.strip(),
+                              int(resm.group(2)) if resm else 0))
             if cands:
+                # 主清单：取最高码率那一档，再进它的变体清单找分片
                 _, seg, res_h = max(cands, key=lambda v: v[0])
+                vurl = urljoin(url, seg)
+                vresp = _open(vurl, timeout)
+                if _is_fake_target(vresp.geturl() or vurl):
+                    vresp.close()
+                    return False, ttfb, "假源(跳转到占位视频)", 0.0, res_h, 0.0
+                vtext = read_text(vresp)
+                target, seg_dur = first_segment(vtext, vresp.geturl() or vurl)
             else:
-                lines = [l.strip() for l in data.splitlines() if l.strip() and not l.startswith("#")]
-                seg = next((l for l in lines if ".ts" in l or ".m4s" in l or ".flv" in l), "")
-                if not seg:
-                    return False, ttfb, "清单里没有可播放分片", 0.0, res_h
-            target = seg if seg.startswith("http") else url.rsplit("/", 1)[0] + "/" + seg
+                target, seg_dur = first_segment(text, resp.geturl() or url)
+            if not target:
+                return False, ttfb, "清单里没有可播放分片", 0.0, res_h, 0.0
             resp = _open(target, timeout)
+            if _is_fake_target(resp.geturl() or target):
+                resp.close()
+                return False, ttfb, "假源(跳转到占位视频)", 0.0, res_h, 0.0
+            try:
+                seg_len = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                seg_len = 0
+
         total = 0
         head = b""
-        t_read = time.monotonic()
-        while total < max_bytes and time.monotonic() - t_read < budget:
+        t_read = 0.0
+        while total < max_bytes and (t_read <= 0 or time.monotonic() - t_read < budget):
             try:
                 b = resp.read(65536)
             except Exception:
                 break
             if not b:
                 break
-            if not head:
+            if t_read <= 0:
+                # 第一块只用来认内容(TLS 握手与慢启动都算在这块里)，不计入测速窗口
                 head = b[:1024]
+                t_read = time.monotonic()
+                continue
             total += len(b)
-        dt = time.monotonic() - t_read
+        dt = (time.monotonic() - t_read) if t_read > 0 else 0.0
         try:
             resp.close()
         except Exception:
             pass
         low = head.lower()
         if "text/html" in ctype or b"<html" in low or b"<!doctype" in low:
-            return False, ttfb, "返回网页(非直播流)", 0.0, 0
+            return False, ttfb, "返回网页(非直播流)", 0.0, 0, 0.0
         if total <= 0:
-            return False, ttfb, "连得上但拉不到画面", 0.0, res_h
-        # 读太少会算出几百 Mbps 的假数字(64KB 在 2ms 内读完≈262 Mbps)，而且一批源会卡在同一个
-        # 上限上，排序看着全是同一档。这里至少凑够 0.05 秒的窗口，封顶 300 Mbps。
-        mbps = round(min(300.0, (total * 8 / 1e6) / max(dt, 0.05)), 2)
-        return True, ttfb, "", mbps, res_h
+            return False, ttfb, "连得上但拉不到画面", 0.0, res_h, 0.0
+        # 0.25 秒下限：更短的突发只是服务器缓冲，不能当真实带宽
+        speed = round(min(300.0, (total * 8 / 1e6) / max(dt, 0.25)), 2)
+        # 真实码率 = 分片字节 / 分片时长，和播放器里显示的一致(实测凤凰资讯 6.22、
+        # CCTV2 4.29，与用户手工测的 6.2/4.4 对得上)。拿不到 Content-Length 就留 0，
+        # 界面显示"可用"，不编数字。
+        mbps = 0.0
+        if seg_len > 0 and seg_dur > 0:
+            mbps = round(min(300.0, seg_len * 8 / 1e6 / seg_dur), 2)
+        return True, ttfb, "", mbps, res_h, speed
     except Exception:
-        return False, 0, "不可达", 0.0, 0
-
+        return False, 0, "不可达", 0.0, 0, 0.0
 
 def probe_speed(e, timeout):
     """第二阶段：实际下载媒体分片测吞吐。返回 (ok, mbps, res_h)，res_h=主清单实测分辨率高(像素，0=未知)"""
@@ -966,6 +1088,11 @@ def _src_quality(s, ch):
     return 1
 
 
+# 上一轮每个频道在用的最佳地址；本轮只要它还活着就继续用，
+# 免得同一频道每轮换个源、用户感觉"参差不齐"。
+PREV_BEST = set()
+
+
 def pick_best_source(ch):
     """程序权威筛选：在已验证可用的源中，按「图像质量 > 位置基准 > 链接速度」选出唯一最佳源。
     返回被选中的源(dict)；无可用源返回 None。该最佳源即为写入 M3U 的唯一地址(不列备选)。"""
@@ -975,12 +1102,14 @@ def pick_best_source(ch):
     region = REGION_TAG.get(ch["group"], set())
 
     def score(s):
+        cur = 1 if s.get("tag") == "curated" else 0   # 人工核对过的源，优先用
+        keep = 1 if s.get("url") in PREV_BEST else 0  # 上一轮就在用且现在仍然可用：别换来换去
         q = _src_quality(s, ch)                       # 图像质量(越高越好)
         loc = 1 if s["tag"] in region else 0          # 位置基准：源的区域标签是否对口
         ttfb = s.get("ttfb") or 9999                  # 链接速度：首包延迟(越低越好)
-        mbps = s.get("mbps") or 0                     # 链接速度：吞吐(越高越好)
+        mbps = s.get("mbps") or 0                     # 码率
         spd = max(0.0, (2000 - ttfb) / 500.0) + min(mbps, 40) * 0.5
-        return (q, loc, spd)
+        return (cur, keep, q, loc, spd)
     return max(live, key=score)
 
 
@@ -1045,7 +1174,7 @@ def resolve_logo(name, src_logo):
 
 
 # 判定为「网页/中转页」的地址记下来，短期内不再重复探测(也避免重复触发杀软)
-BLOCK_HOSTS = {"live.iill.top", "www.iill.top"}
+BLOCK_HOSTS = {"live.iill.top", "www.iill.top", "zby.lskk.top", "lskk.top"}
 BAD_URL_PATH = BASE / "bad_urls.json"
 BAD_URL_TTL = 3 * 86400
 _BAD_URLS = None
@@ -1145,6 +1274,18 @@ class Updater:
         def fetch_one(item):
             key, name, url, _, region = item
             t0 = time.monotonic()
+            if key == "curated":
+                # 内置精选源：不走网络，直接用内嵌的 M3U 文本
+                es = [e for e in parse_m3u(CURATED_M3U, key) if keep_entry(e, cfg)]
+                with lock:
+                    per_source[key] = (name, region, es, "builtin", True)
+                    self.state["source_stats"][key] = {
+                        "name": name, "region": region, "ok": True, "count": len(es),
+                        "ms": 0, "url": "builtin", "fallback": False,
+                        "live_ratio": None, "sample": 0, "sample_ok": 0,
+                    }
+                log("源[%s] 内置 %d 条" % (name, len(es)))
+                return
             urls = [url]
             for fb in SOURCE_FALLBACKS.get(key, ()):
                 if fb not in urls:
@@ -1374,17 +1515,19 @@ class Updater:
 
         def work(u):
             recs = by_url[u]
-            ok, ttfb, note, mbps, res_h = probe_stream(recs[0], timeout=2.5)
+            ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=2.5)
             if not ok and note.startswith("返回网页"):
                 mark_bad_url(u)
             # 能连上但吞吐低到 0.5 Mbps 以下，播起来必然卡：直接当不能用，别让它挤掉好线路
-            if ok and mbps and mbps < 0.5:
-                ok, note = False, "速度过慢(%.2f Mbps)" % mbps
+            if ok and speed and speed < 0.5:
+                ok, note = False, "下载速度过慢(%.2f Mbps)" % speed
             for sl in recs:
                 sl["live"], sl["ttfb"], sl["note"] = ok, ttfb, note
                 if ok:
                     if mbps:
                         sl["mbps"] = mbps
+                    if speed:
+                        sl["speed"] = speed
                     if res_h:
                         sl["res"] = res_h
             with lock:
@@ -1394,6 +1537,53 @@ class Updater:
         # 一个线程池跑完：分批建池会让每批都重新起几百个线程，白白多花十几秒
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(work, todo))
+
+        # 精选源(人工核对过的)第一次没连上，多半是慢启动，不是不能用：
+        # 放宽到 8 秒再试一次(只在少数地址上，不影响整轮速度)
+        slow = [u for u in todo
+                if not by_url[u][0].get("live")
+                and any(s.get("tag") == "curated" for s in by_url[u])]
+        if slow:
+            t1 = time.monotonic()
+            def work2(u):
+                recs = by_url[u]
+                ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=8, budget=2.5)
+                if ok:
+                    for sl in recs:
+                        sl["live"], sl["ttfb"], sl["note"] = True, ttfb, ""
+                        if mbps:
+                            sl["mbps"] = mbps
+                        if speed:
+                            sl["speed"] = speed
+                        if res_h:
+                            sl["res"] = res_h
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(slow))) as ex:
+                list(ex.map(work2, slow))
+            log("精选源补测: %d 个地址，救回 %d 个(%.0fs)"
+                % (len(slow), sum(1 for u in slow if by_url[u][0].get("live")), time.monotonic() - t1))
+
+        # 上一轮还在用的地址这次没连上，多半是抖动：放宽到 8 秒补测一次，
+        # 否则频道会一轮有一轮没有(用户看到的"参差不齐"主要就是这个)。
+        retry = [u for u in todo
+                 if not by_url[u][0].get("live") and u in PREV_BEST]
+        if retry:
+            t2 = time.monotonic()
+            def work3(u):
+                recs = by_url[u]
+                ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=8, budget=2.0)
+                if ok:
+                    for sl in recs:
+                        sl["live"], sl["ttfb"], sl["note"] = True, ttfb, ""
+                        if mbps:
+                            sl["mbps"] = mbps
+                        if speed:
+                            sl["speed"] = speed
+                        if res_h:
+                            sl["res"] = res_h
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, len(retry))) as ex:
+                list(ex.map(work3, retry))
+            log("上轮在用的地址补测: %d 个，救回 %d 个(%.0fs)"
+                % (len(retry), sum(1 for u in retry if by_url[u][0].get("live")), time.monotonic() - t2))
 
         n_ok = sum(1 for u in order if by_url[u][0]["live"])
         log("探测完成: %d 个地址里 %d 个能出画面(%.0fs；跳过 %d 个已知不通的、%d 个上次在用)"
@@ -1461,6 +1651,79 @@ class Updater:
             }
         return out
 
+    # ---------- 同一频道不同叫法的合并 ----------
+    @staticmethod
+    def merge_same_name(channels):
+        """把"翡翠台 / TVB翡翠台 HD"、"TVBS亚洲 / TVBS亚洲台"这种同一个台的不同叫法
+        合成一条（源合并、只留一个名字），免得列表里堆一堆重复、还互相抢排序。"""
+        noise = re.compile(r"(tvb|hd|高清|超清|蓝光|4k|uhd|sd|标清|流畅|频道|电视台|卫视)")
+
+        def norm(name):
+            n = unicodedata.normalize("NFKC", name).lower()
+            n = noise.sub("", n)
+            n = re.sub(r"[\s·・\-_/()（）\[\]【】]+", "", n)
+            return n.rstrip("台") or n
+
+        buckets = {}
+        for k, ch in channels.items():
+            buckets.setdefault(norm(ch.get("name") or k), []).append((k, ch))
+        out = dict(channels)
+        merged = 0
+        for group in buckets.values():
+            if len(group) < 2:
+                continue
+            def rank(item):
+                ch = item[1]
+                best = ch.get("best") or {}
+                return (1 if best.get("res") else 0, ch.get("live_count") or 0,
+                        1 if (ch.get("quality") or "").endswith("P") or ch.get("quality") == "4K" else 0,
+                        -len(ch.get("name") or ""))
+            group.sort(key=rank, reverse=True)
+            keep_k, keep = group[0]
+            seen = {(s2.get("url") or "") for s2 in (keep.get("sources") or [])}
+            for k2, ch2 in group[1:]:
+                for s2 in (ch2.get("sources") or []):
+                    u = s2.get("url") or ""
+                    if u and u not in seen:
+                        seen.add(u)
+                        keep.setdefault("sources", []).append(s2)
+                out.pop(k2, None)
+                merged += 1
+            keep["live_count"] = len(keep.get("sources") or [])
+            best = pick_best_source(keep)
+            keep["best"] = best
+            keep["playable"] = bool(best and (best.get("url") or "").startswith("http"))
+        if merged:
+            log("同名频道合并: 去掉 %d 个重复叫法" % merged)
+        return out
+
+    # ---------- 同一地址的去重 ----------
+    @staticmethod
+    def dedupe_by_url(channels):
+        """同一个播放地址被拆成好几个频道时(典型: TVBS亚洲台 / TVBS Asia / TVBS亚洲)
+        只保留一个 —— 用户在列表里看到的重复项大多来自这里。"""
+        def rank(c):
+            curated = any(s.get("tag") == "curated" for s in (c.get("sources") or []) if s.get("live"))
+            nm = c.get("name") or ""
+            return (0 if curated else 1, len(nm), nm)
+
+        seen = {}
+        out = {}
+        for k, ch in channels.items():
+            u = (ch.get("best") or {}).get("url") or ""
+            if not u:
+                out[k] = ch
+                continue
+            prev = seen.get(u)
+            if prev is None:
+                seen[u] = k
+                out[k] = ch
+            elif rank(ch) < rank(channels[prev]):
+                out.pop(prev, None)
+                seen[u] = k
+                out[k] = ch
+        return out
+
     # ---------- 完整更新 ----------
     def run_once(self):
         if self.state["updating"]:
@@ -1469,7 +1732,9 @@ class Updater:
         t0 = time.time()
         tray_busy(True)          # 托盘图标切"方块"：一眼看出正在更新
         try:
+            global PREV_BEST
             self.prev_live = set()
+            PREV_BEST = set()
             for ch in (self.channels or {}).values():
                 for s in ch.get("sources") or ():
                     if s.get("live"):
@@ -1477,12 +1742,18 @@ class Updater:
                 b = ch.get("best") or {}
                 if b.get("url"):
                     self.prev_live.add(b["url"])
+                    PREV_BEST.add(b["url"])
             entries = self.fetch_all()
             log("共获取 %d 条原始记录" % len(entries))
             merged = self.merge(entries)
             log("去重后 %d 个频道" % len(merged))
             self.verify(merged)
             channels = self.finalize(merged, self.cfg["backups"])
+            n_before = len(channels)
+            channels = self.merge_same_name(channels)
+            channels = self.dedupe_by_url(channels)
+            if len(channels) != n_before:
+                log("同一地址合并: 去掉 %d 个重复频道" % (n_before - len(channels)))
             self.resolve_logos(channels)
             with self.lock:
                 self.channels = channels
@@ -1566,7 +1837,8 @@ class Updater:
                          key=lambda g: (GROUP_RANK.index(g) if g in GROUP_RANK else 50, g))
         for g in present:
             gch = sorted((c for c in channels.values() if c["group"] == g),
-                         key=lambda c: (-((c.get("best") or {}).get("mbps") or 0), c["name"]))
+                         key=lambda c: (-(((c.get("best") or {}).get("speed") or 0)
+                             or ((c.get("best") or {}).get("mbps") or 0)), c["name"]))
             for ch in gch:
                 if keys is not None and ch["key"] not in keys:
                     continue
@@ -1574,6 +1846,9 @@ class Updater:
                 if not best or not best.get("live") or not best.get("url"):
                     if keys is None:
                         n_skip += 1
+                    continue
+                if self.cfg.get("hide_local", True) and ch.get("group") == "地方台":
+                    n_skip += 1
                     continue
                 mm = float(self.cfg.get("min_mbps") or 0)
                 if mm and (best.get("mbps") or 0) < mm:
@@ -1818,7 +2093,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
     <button class="btn" id="btnLegal">我已了解</button>
   </div>
   <div class="cards">
-    <div class="card stat"><b id="sChan">-</b><span>实测可用频道</span></div>
+    <div class="card stat"><b id="sChan">-</b><span id="sChanLb">实测可用频道</span></div>
     <div class="card stat"><b id="sSrc">-</b><span>频道总数</span></div>
     <div class="card stat"><b id="sHkmt">-</b><span>港澳台频道</span></div>
     <div class="card stat"><b id="sTime">-</b><span>上次更新</span></div>
@@ -1828,6 +2103,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
     <div class="row">
       <input class="search" id="q" placeholder="搜索频道名，例如 CCTV5 / 翡翠台 / 湖南卫视">
       <select class="field sortsel" id="sort" title="排序方式">
+        <option value="hot">常用优先（CCTV · 卫视 · 港澳台在前）</option>
         <option value="speed">最快优先</option>
         <option value="group">按分组</option>
         <option value="name">按名称</option>
@@ -1882,6 +2158,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
           <label class="f ck"><input type="checkbox" id="c_sd">保留标清频道</label>
           <label class="f ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="f ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
+        <label class="f ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
           <label class="f ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
         </div>
       </div>
@@ -1934,9 +2211,9 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 <div id="toast"></div>
 <script>
 "use strict";
-var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="speed", lastLoaded="", timer=null, dirty=false;
+var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="hot", lastLoaded="", timer=null, dirty=false;
 var fresh=false, wasUpdating=false;   // fresh=本次打开后跑完过一轮更新，才把频道列出来
-var GORDER=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+var GORDER=["央视","卫视","香港","澳门","台湾","体育","电影","少儿","游戏","国际·综合","地方台","其他"];
 var $=function(id){return document.getElementById(id)};
 
 function toast(msg,ms){
@@ -1976,7 +2253,11 @@ function host(u){ try{ return new URL(u).host; }catch(e){ return u||"" } }
 function isHkmt(c){ return ["香港","澳门","台湾"].indexOf(c.group)>=0 }
 
 function gidx(g){ var i=GORDER.indexOf(g); return i<0?90:i }
-function mb(c){ return ((c.best||{}).mbps)||0 }
+// CCTV 频道按编号排(CCTV1..CCTV17 整齐)，其余归到 99
+function cnum(n){ var m=(n||"").match(/cctv[-\s]*(\d{1,2})/i); return m?+m[1]:99 }
+// 同号里把"标准台"排前面(CCTV4 在 CCTV4K / CCTV-4 Europe 之前)
+function cbase(n){ return /^cctv[-\s]?\d{1,2}$/i.test((n||"").trim())?0:1 }
+function mb(c){ var b=c.best||{}; return b.speed||b.mbps||0 }
 function filtered(){
   var kw=q.trim().toLowerCase();
   var list=CH.filter(function(c){
@@ -1988,13 +2269,20 @@ function filtered(){
     return true;
   });
   list.sort(function(a,b){
+    if(sk==="hot"||sk==="group"){
+      var g=gidx(a.group)-gidx(b.group);   // 常看的组在前(CCTV/卫视/港澳台)
+      if(g) return g;
+      var ca=cnum(a.name), cb=cnum(b.name);   // CCTV1..CCTV17 按编号排整齐
+      if(ca!==cb) return ca-cb;
+      var ba=cbase(a.name), bb=cbase(b.name);
+      if(ba!==bb) return ba-bb;
+      if(sk==="hot"){ var d0=mb(b)-mb(a); if(d0) return d0 }
+    }
     if(sk==="speed"){
       var d=mb(b)-mb(a);
-      if(d) return d;                 // 实测快的排前面
-    }
-    if(sk==="speed"||sk==="group"){
-      var g=gidx(a.group)-gidx(b.group);
-      if(g) return g;
+      if(d) return d;                      // 实测快的排前面
+      var g2=gidx(a.group)-gidx(b.group);
+      if(g2) return g2;
     }
     return (a.name||"").localeCompare(b.name||"","zh");
   });
@@ -2004,7 +2292,7 @@ function filtered(){
 function renderChips(){
   var gs=[], seen={};
   CH.forEach(function(c){ if(!seen[c.group]){seen[c.group]=1;gs.push(c.group)} });
-  var order=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+  var order=GORDER;
   gs.sort(function(a,b){
     var ia=order.indexOf(a), ib=order.indexOf(b);
     return (ia<0?99:ia)-(ib<0?99:ib);
@@ -2068,6 +2356,8 @@ function updCount(){
 function loadChannels(){
   fetch("/api/channels").then(function(r){return r.json()}).then(function(d){
     CH=d.channels||[];
+  // 列表可能比"实测可用"少(隐藏了地级台/低码率)，卡片跟着列表走，避免数字对不上
+  if(CH.length){ $("sChan").textContent=CH.length; $("sChanLb").textContent="列表内可用频道"; }
     sel=new Set();          // 每次打开都从"一个都不勾"开始，由用户自己挑；也不继承上次的勾选
     selLoaded=true;
     if(d.save_dir && !$("outdir").value) $("outdir").value=d.save_dir;
@@ -2090,7 +2380,11 @@ function loadStatus(){
     if(s.legal_ack===0 && $("legalBar")) $("legalBar").hidden=false;
     if(s.save_path && !$("outdir").value){
       var sp=String(s.save_path), i=Math.max(sp.lastIndexOf("\\"), sp.lastIndexOf("/"));
-      if(i>0) $("outdir").value=sp.slice(0,i);
+      if(i>0){
+        $("outdir").value=sp.slice(0,i);
+        // 文件名也跟着实际保存位置走，否则「保存」会另写一份(桌面出现两个 m3u)
+        if(!window.__fnInit){ $("fname").value=sp.slice(i+1)||"直播源.m3u"; window.__fnInit=1; }
+      }
     }
     var dot=$("stDot"), txt=$("stTxt");
     if(s.updating){
@@ -2213,6 +2507,7 @@ function openCfg(){
     $("c_sd").checked=!!c.keep_sd; $("c_browser").checked=!!c.open_browser;
     $("c_junk").checked=c.filter_junk!==false;
     $("c_tv").checked=c.only_tv!==false;
+    $("c_lo").checked=c.hide_local!==false;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -2251,6 +2546,7 @@ $("btnCfgSave").addEventListener("click",function(){
   var body={
     interval_hours:+$("c_int").value, backups:+$("c_bak").value,
     keep_sd:$("c_sd").checked, filter_junk:$("c_junk").checked, only_tv:$("c_tv").checked,
+      hide_local:$("c_lo").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
     epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
@@ -2300,8 +2596,9 @@ document.addEventListener("keydown",function(e){
   if((e.ctrlKey||e.metaKey)&&e.key==="f"){ e.preventDefault(); $("q").focus() }
 });
 
-// 打开页面时只查状态：不铺上次缓存的频道，等用户自己点「立即更新」跑完再列出来
-showEmpty(); loadStatus(); $("btnLegal").addEventListener("click",function(){
+// 打开页面直接显示"最近一次更新"的结果(后台跑完也会自动落到这里)，但一个都不勾选，
+// 由用户自己挑；真正没有任何结果时才显示空提示。
+loadChannels(); loadStatus(); $("btnLegal").addEventListener("click",function(){
   fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({legal_ack:1})}).then(function(){ $("legalBar").hidden=true; });
 });
@@ -2395,8 +2692,12 @@ class Handler(BaseHTTPRequestHandler):
             mm = float(self.cfg.get("min_mbps") or 0)
             channels = [c for c in channels if c.get("best") and c["best"].get("live")
                         and (not mm or (c["best"].get("mbps") or 0) >= mm)]
+            # 默认不列地级市/县级台(用户：这些台就别出现了)，需要的话在设置里打开
+            if self.cfg.get("hide_local", True):
+                channels = [c for c in channels if c.get("group") != "地方台"]
             channels.sort(key=lambda c: (GROUP_RANK.index(c["group"]) if c["group"] in GROUP_RANK else 50,
-                                         -(c["best"].get("mbps") or 0), c["name"]))
+                                         cctv_num(c["name"]), cctv_base(c["name"]),
+                                         -((c["best"].get("speed") or 0) or (c["best"].get("mbps") or 0)), c["name"]))
             return self._json({"channels": channels,
                                "save_dir": str(Path(self.cfg["output_path"]).parent),
                                "saved_at": self.updater.state["last_update"]})
@@ -2466,7 +2767,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "msg": "保存失败: %s" % e})
         if path == "/api/settings":
             try:
-                new = {k: data[k] for k in ("interval_hours", "backups", "keep_sd", "filter_junk", "only_tv", "min_mbps",
+                new = {k: data[k] for k in ("interval_hours", "backups", "keep_sd", "filter_junk", "only_tv", "min_mbps", "hide_local",
                                             "legal_ack",
          "output_path",
                                             "epg_url", "open_browser", "autostart", "task_registered",

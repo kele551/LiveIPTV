@@ -194,7 +194,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
     <button class="btn" id="btnLegal">我已了解</button>
   </div>
   <div class="cards">
-    <div class="card stat"><b id="sChan">-</b><span>实测可用频道</span></div>
+    <div class="card stat"><b id="sChan">-</b><span id="sChanLb">实测可用频道</span></div>
     <div class="card stat"><b id="sSrc">-</b><span>频道总数</span></div>
     <div class="card stat"><b id="sHkmt">-</b><span>港澳台频道</span></div>
     <div class="card stat"><b id="sTime">-</b><span>上次更新</span></div>
@@ -204,6 +204,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
     <div class="row">
       <input class="search" id="q" placeholder="搜索频道名，例如 CCTV5 / 翡翠台 / 湖南卫视">
       <select class="field sortsel" id="sort" title="排序方式">
+        <option value="hot">常用优先（CCTV · 卫视 · 港澳台在前）</option>
         <option value="speed">最快优先</option>
         <option value="group">按分组</option>
         <option value="name">按名称</option>
@@ -258,6 +259,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
           <label class="f ck"><input type="checkbox" id="c_sd">保留标清频道</label>
           <label class="f ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="f ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
+        <label class="f ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
           <label class="f ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
         </div>
       </div>
@@ -310,9 +312,9 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 <div id="toast"></div>
 <script>
 "use strict";
-var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="speed", lastLoaded="", timer=null, dirty=false;
+var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="hot", lastLoaded="", timer=null, dirty=false;
 var fresh=false, wasUpdating=false;   // fresh=本次打开后跑完过一轮更新，才把频道列出来
-var GORDER=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+var GORDER=["央视","卫视","香港","澳门","台湾","体育","电影","少儿","游戏","国际·综合","地方台","其他"];
 var $=function(id){return document.getElementById(id)};
 
 function toast(msg,ms){
@@ -352,7 +354,11 @@ function host(u){ try{ return new URL(u).host; }catch(e){ return u||"" } }
 function isHkmt(c){ return ["香港","澳门","台湾"].indexOf(c.group)>=0 }
 
 function gidx(g){ var i=GORDER.indexOf(g); return i<0?90:i }
-function mb(c){ return ((c.best||{}).mbps)||0 }
+// CCTV 频道按编号排(CCTV1..CCTV17 整齐)，其余归到 99
+function cnum(n){ var m=(n||"").match(/cctv[-\s]*(\d{1,2})/i); return m?+m[1]:99 }
+// 同号里把"标准台"排前面(CCTV4 在 CCTV4K / CCTV-4 Europe 之前)
+function cbase(n){ return /^cctv[-\s]?\d{1,2}$/i.test((n||"").trim())?0:1 }
+function mb(c){ var b=c.best||{}; return b.speed||b.mbps||0 }
 function filtered(){
   var kw=q.trim().toLowerCase();
   var list=CH.filter(function(c){
@@ -364,13 +370,20 @@ function filtered(){
     return true;
   });
   list.sort(function(a,b){
+    if(sk==="hot"||sk==="group"){
+      var g=gidx(a.group)-gidx(b.group);   // 常看的组在前(CCTV/卫视/港澳台)
+      if(g) return g;
+      var ca=cnum(a.name), cb=cnum(b.name);   // CCTV1..CCTV17 按编号排整齐
+      if(ca!==cb) return ca-cb;
+      var ba=cbase(a.name), bb=cbase(b.name);
+      if(ba!==bb) return ba-bb;
+      if(sk==="hot"){ var d0=mb(b)-mb(a); if(d0) return d0 }
+    }
     if(sk==="speed"){
       var d=mb(b)-mb(a);
-      if(d) return d;                 // 实测快的排前面
-    }
-    if(sk==="speed"||sk==="group"){
-      var g=gidx(a.group)-gidx(b.group);
-      if(g) return g;
+      if(d) return d;                      // 实测快的排前面
+      var g2=gidx(a.group)-gidx(b.group);
+      if(g2) return g2;
     }
     return (a.name||"").localeCompare(b.name||"","zh");
   });
@@ -380,7 +393,7 @@ function filtered(){
 function renderChips(){
   var gs=[], seen={};
   CH.forEach(function(c){ if(!seen[c.group]){seen[c.group]=1;gs.push(c.group)} });
-  var order=["香港","澳门","台湾","央视","卫视","地方台","电影","体育","游戏","少儿","其他"];
+  var order=GORDER;
   gs.sort(function(a,b){
     var ia=order.indexOf(a), ib=order.indexOf(b);
     return (ia<0?99:ia)-(ib<0?99:ib);
@@ -444,6 +457,8 @@ function updCount(){
 function loadChannels(){
   fetch("/api/channels").then(function(r){return r.json()}).then(function(d){
     CH=d.channels||[];
+  // 列表可能比"实测可用"少(隐藏了地级台/低码率)，卡片跟着列表走，避免数字对不上
+  if(CH.length){ $("sChan").textContent=CH.length; $("sChanLb").textContent="列表内可用频道"; }
     sel=new Set();          // 每次打开都从"一个都不勾"开始，由用户自己挑；也不继承上次的勾选
     selLoaded=true;
     if(d.save_dir && !$("outdir").value) $("outdir").value=d.save_dir;
@@ -466,7 +481,11 @@ function loadStatus(){
     if(s.legal_ack===0 && $("legalBar")) $("legalBar").hidden=false;
     if(s.save_path && !$("outdir").value){
       var sp=String(s.save_path), i=Math.max(sp.lastIndexOf("\\"), sp.lastIndexOf("/"));
-      if(i>0) $("outdir").value=sp.slice(0,i);
+      if(i>0){
+        $("outdir").value=sp.slice(0,i);
+        // 文件名也跟着实际保存位置走，否则「保存」会另写一份(桌面出现两个 m3u)
+        if(!window.__fnInit){ $("fname").value=sp.slice(i+1)||"直播源.m3u"; window.__fnInit=1; }
+      }
     }
     var dot=$("stDot"), txt=$("stTxt");
     if(s.updating){
@@ -589,6 +608,7 @@ function openCfg(){
     $("c_sd").checked=!!c.keep_sd; $("c_browser").checked=!!c.open_browser;
     $("c_junk").checked=c.filter_junk!==false;
     $("c_tv").checked=c.only_tv!==false;
+    $("c_lo").checked=c.hide_local!==false;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -627,6 +647,7 @@ $("btnCfgSave").addEventListener("click",function(){
   var body={
     interval_hours:+$("c_int").value, backups:+$("c_bak").value,
     keep_sd:$("c_sd").checked, filter_junk:$("c_junk").checked, only_tv:$("c_tv").checked,
+      hide_local:$("c_lo").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
     epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
@@ -676,8 +697,9 @@ document.addEventListener("keydown",function(e){
   if((e.ctrlKey||e.metaKey)&&e.key==="f"){ e.preventDefault(); $("q").focus() }
 });
 
-// 打开页面时只查状态：不铺上次缓存的频道，等用户自己点「立即更新」跑完再列出来
-showEmpty(); loadStatus(); $("btnLegal").addEventListener("click",function(){
+// 打开页面直接显示"最近一次更新"的结果(后台跑完也会自动落到这里)，但一个都不勾选，
+// 由用户自己挑；真正没有任何结果时才显示空提示。
+loadChannels(); loadStatus(); $("btnLegal").addEventListener("click",function(){
   fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({legal_ack:1})}).then(function(){ $("legalBar").hidden=true; });
 });
