@@ -143,8 +143,9 @@ CURATED = [
     ("CCTV2 财经", "http://8.138.7.223/tv/cctv2.php", "央视"),
     ("CCTV8K", "http://107.150.52.50:82/live/cctv8k.m3u8", "央视"),
     ("湖南卫视", "http://hlsal-ldvt.qing.mgtv.com/nn_live/nn_x64/Y2RuZXhfaWQ9YWxfaGxzX2xkdnQmZT02OTE0NjA0JnY9MSZpZD1ITldTWkdTVCZzPTcwN2RiYTc2YzJjNmJmMTQ4MmUyZGYzOWU2NWM3YWFi/HNWSZGST.m3u8", "卫视"),
-    ("凤凰卫视中文台", "http://120.198.95.220:9901/tsfile/live/1036_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
-    ("凤凰卫视资讯台", "http://120.198.95.220:9901/tsfile/live/1037_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
+    # 用户实测：1036 放的是凤凰资讯、1037 放的是凤凰中文，名字按实际画面登记
+    ("凤凰资讯台", "http://120.198.95.220:9901/tsfile/live/1036_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
+    ("凤凰中文台", "http://120.198.95.220:9901/tsfile/live/1037_1.m3u8?key=txiptv&playlive=1&down=1", "香港"),
     ("翡翠台", "http://103.172.187.30:12000/stream/mytv/null-1/master.m3u8", "香港"),
     ("黄金翡翠", "http://103.172.187.30:12000/stream/mytv/null-12/master.m3u8", "香港"),
     ("电影台", "http://103.172.187.30:12000/stream/mytv/null-10/master.m3u8", "香港"),
@@ -1145,6 +1146,9 @@ def pick_best_source(ch):
 
 # 图标库模板({name} 为 URL 编码后的中文台名)；均为 2026-10 实测用户网络可达
 LOGO_TPLS = [
+    # 同样的图站在国内快一些(jsDelivr)，raw 兜底
+    "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/{name}.png",
+    "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/{name}.png",
     "https://raw.githubusercontent.com/CCSH/IPTV/refs/heads/main/logo/{name}.png",
     "https://raw.githubusercontent.com/fanmingming/live/main/tv/{name}.png",
 ]
@@ -1234,9 +1238,18 @@ def resolve_logo(name, src_logo):
             _LOGO_CACHE[src_logo] = [now0, ok0]
             if ok0:
                 return src_logo
+    # 台名变体：带"台/频道"后缀、带 HD、带空格的写法，图标库里常常只收了其中一种
+    names = [name]
+    n2 = re.sub(r"\s*[hH][dD]\s*$", "", name).strip()
+    n3 = re.sub(r"(电视台|频道|台)$", "", name).strip()
+    n4 = name.replace(" ", "")
+    for v in (n2, n3, n4):
+        if v and v not in names:
+            names.append(v)
     cands = []
-    qn = quote(name)
-    cands += [t.format(name=qn) for t in LOGO_TPLS]
+    for nm in names:
+        qn = quote(nm)
+        cands += [t.format(name=qn) for t in LOGO_TPLS]
     now = time.time()
     for u in cands:
         ent = _LOGO_CACHE.get(u)
@@ -1787,7 +1800,10 @@ class Updater:
             def rank(item):
                 ch = item[1]
                 best = ch.get("best") or {}
-                return (1 if best.get("res") else 0, ch.get("live_count") or 0,
+                # 人工核对过的精选源名字优先(凤凰资讯台/凤凰中文台 这类，
+                # 聚合源的叫法可能是错的，别让它把精选源的名字顶掉)
+                cur = 1 if any(s3.get("tag") == "curated" for s3 in (ch.get("sources") or [])) else 0
+                return (cur, 1 if best.get("res") else 0, ch.get("live_count") or 0,
                         1 if (ch.get("quality") or "").endswith("P") or ch.get("quality") == "4K" else 0,
                         -len(ch.get("name") or ""))
             group.sort(key=rank, reverse=True)
@@ -2520,6 +2536,20 @@ function renderChips(){
   });
   $("chips").innerHTML=html;
 }
+function logoTile(name){
+  // 没有台标图片时补一个"字母牌"：按名字取稳定颜色 + 头 2~3 个字，整列看起来是齐的
+  var n = (name||"?").replace(/\s+/g,"");
+  // 取最有辨识度的一段：CCTV2 财经 → 财经；CCTV-4 Europe → Eur
+  var parts = (name||"").split(/[\s\-—·]+/).filter(function(x){return x});
+  var tail = parts.length ? parts[parts.length-1] : n;
+  var isCJK = /[\u4e00-\u9fa5]/.test(tail);
+  var ch = isCJK ? tail.slice(0,3) : tail.slice(0,3).toUpperCase();
+  var h = 0;
+  for (var i=0;i<n.length;i++) h = (h*31 + n.charCodeAt(i)) % 360;
+  return '<span class="ph" style="background:hsl('+h+',58%,46%);color:#fff;font-size:10px;'+
+         'display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0 2px">'+
+         esc(ch)+'</span>';
+}
 function esc(s){
   return String(s==null?"":s).replace(/[&<>"']/g,function(m){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];
@@ -2545,7 +2575,7 @@ function renderRows(){
     var n=(c.sources||[]).length;
     html+='<div class="tr'+(alive?"":" dead")+'" data-k="'+esc(c.key)+'">'
       +'<div><input type="checkbox" data-ck="'+esc(c.key)+'"'+(sel.has(c.key)?" checked":"")+'></div>'
-      +'<div class="nm"><img loading="lazy" src="'+esc(c.logo||"")+'" onerror="this.style.visibility=\'hidden\'">'
+      +'<div class="nm">'+(c.logo?('<img loading="lazy" src="'+esc(c.logo)+'" onerror="this.style.visibility=\'hidden\'">'):logoTile(c.name))
       +'<span class="t">'+esc(c.name)+'</span>'+(n>1?'<span class="nsrc">'+n+' 源</span>':'')+'</div>'
       +'<div class="grp">'+esc(c.group)+'</div>'
       +'<div class="qa"><span class="'+tagCls(c)+'">'+esc(spd(c)||"未知")+'</span>'
@@ -3442,16 +3472,31 @@ def check_self_update(cfg, force=False):
         # raw.githubusercontent 走 CDN，可能"清单是旧提交、签名是新提交"→ 必然验签失败。
         # 所以：两个 CDN(raw + jsDelivr)各试两轮，每个来源都加时间戳，只认能验签通过的那一对。
         base = cfg["update_url"]
-        bases = [base]
+        bases = []
         if "raw.githubusercontent.com/" in base:
             try:
                 tail = base.split("raw.githubusercontent.com/", 1)[1]
                 owner_repo, rest = tail.split("/", 1)
                 repo, rest = rest.split("/", 1)
                 branch, path = rest.split("/", 1)
+                # 按"提交号"取文件：同一提交的 version.json 和 .sig 一定配套，
+                # 也不会被 CDN 的 5 分钟缓存搞成"一半新一半旧"
+                try:
+                    info = json.loads(_fetch_bytes(
+                        "https://api.github.com/repos/%s/%s/commits/%s" % (owner_repo, repo, branch), 12
+                    ).decode("utf-8", "ignore"))
+                    sha = str(info.get("sha") or "")
+                    if len(sha) >= 7:
+                        bases.append("https://raw.githubusercontent.com/%s/%s/%s/%s"
+                                     % (owner_repo, repo, sha, path))
+                except Exception:
+                    pass
+                bases.append(base)   # 分支地址兜底（CDN 刷新后就一致了）
                 bases.append("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s" % (owner_repo, repo, branch, path))
             except Exception:
                 pass
+        if not bases:
+            bases = [base]
         raw, sig, data = None, b"", None
         for attempt in range(4):
             for b in bases:

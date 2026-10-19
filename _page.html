@@ -482,6 +482,20 @@ function renderChips(){
   });
   $("chips").innerHTML=html;
 }
+function logoTile(name){
+  // 没有台标图片时补一个"字母牌"：按名字取稳定颜色 + 头 2~3 个字，整列看起来是齐的
+  var n = (name||"?").replace(/\s+/g,"");
+  // 取最有辨识度的一段：CCTV2 财经 → 财经；CCTV-4 Europe → Eur
+  var parts = (name||"").split(/[\s\-—·]+/).filter(function(x){return x});
+  var tail = parts.length ? parts[parts.length-1] : n;
+  var isCJK = /[\u4e00-\u9fa5]/.test(tail);
+  var ch = isCJK ? tail.slice(0,3) : tail.slice(0,3).toUpperCase();
+  var h = 0;
+  for (var i=0;i<n.length;i++) h = (h*31 + n.charCodeAt(i)) % 360;
+  return '<span class="ph" style="background:hsl('+h+',58%,46%);color:#fff;font-size:10px;'+
+         'display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0 2px">'+
+         esc(ch)+'</span>';
+}
 function esc(s){
   return String(s==null?"":s).replace(/[&<>"']/g,function(m){
     return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];
@@ -507,7 +521,7 @@ function renderRows(){
     var n=(c.sources||[]).length;
     html+='<div class="tr'+(alive?"":" dead")+'" data-k="'+esc(c.key)+'">'
       +'<div><input type="checkbox" data-ck="'+esc(c.key)+'"'+(sel.has(c.key)?" checked":"")+'></div>'
-      +'<div class="nm"><img loading="lazy" src="'+esc(c.logo||"")+'" onerror="this.style.visibility=\'hidden\'">'
+      +'<div class="nm">'+(c.logo?('<img loading="lazy" src="'+esc(c.logo)+'" onerror="this.style.visibility=\'hidden\'">'):logoTile(c.name))
       +'<span class="t">'+esc(c.name)+'</span>'+(n>1?'<span class="nsrc">'+n+' 源</span>':'')+'</div>'
       +'<div class="grp">'+esc(c.group)+'</div>'
       +'<div class="qa"><span class="'+tagCls(c)+'">'+esc(spd(c)||"未知")+'</span>'
