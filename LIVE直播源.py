@@ -2036,7 +2036,7 @@ class Updater:
 
 # ---------------------------------------------------------------- 网页控制台
 
-PAGE = r"""<!DOCTYPE html>
+PAGE = r"""﻿<!DOCTYPE html>
 <html lang="zh-CN" data-theme="auto">
 <head>
 <meta charset="utf-8">
@@ -2046,17 +2046,19 @@ PAGE = r"""<!DOCTYPE html>
 <style>
 :root{
   --accent:#e11d2e; --accent-d:#c21423; --accent-l:#fdecee;
-  --bg:#f4f5f7; --card:#fff; --txt:#1b1f24; --sub:#6b7280; --line:#e6e8ec;
+  --bg:#dbe5f3; --bg1:#f3f8fd; --card:#fff; --txt:#1b1f24; --sub:#6b7280; --line:#e4e8ef;
   --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
   --shadow:0 1px 2px rgba(16,24,40,.06),0 8px 24px -12px rgba(16,24,40,.18);
   --r:14px;
 }
 html[data-theme="dark"]{
-  --bg:#101216; --card:#181c22; --txt:#e8eaee; --sub:#9aa2ae; --line:#262c35;
+  --bg:#0d1015; --bg1:#161b23; --card:#181d25; --txt:#e8eaee; --sub:#9aa2ae; --line:#252b35;
   --accent-l:#3a1218; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -14px rgba(0,0,0,.7);
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);
+/* 底色：顶部近白、往下淡蓝灰，比原来的一片平灰更有层次（卡片仍是纯白，对比更清楚） */
+body{margin:0;background:var(--bg);background-image:linear-gradient(180deg,var(--bg1) 0,var(--bg) 420px);
+  background-repeat:no-repeat;background-attachment:fixed;color:var(--txt);
   font:14px/1.55 "Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;
   -webkit-font-smoothing:antialiased}
 button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
@@ -3437,10 +3439,15 @@ def check_self_update(cfg, force=False):
     if not force and not cfg.get("self_update"):
         return None
     try:
-        raw = _fetch_bytes(cfg["update_url"])
+        # raw.githubusercontent 走 CDN，会拿到几十分钟前的旧清单；
+        # 加一个同批次的时间戳，保证 version.json 和 .sig 是同一版
+        base = cfg["update_url"]
+        sep = "&" if "?" in base else "?"
+        bust = "%st=%d" % (sep, int(time.time()))
+        raw = _fetch_bytes(base + bust)
         data = json.loads(raw.decode("utf-8", "ignore"))
         try:
-            sig = _fetch_bytes(cfg["update_url"] + ".sig", 15)   # 64 字节二进制或十六进制文本都吃
+            sig = _fetch_bytes(base + ".sig" + bust, 15)   # 64 字节二进制或十六进制文本都吃
         except Exception:
             sig = b""
         if cfg.get("require_sig", True):
