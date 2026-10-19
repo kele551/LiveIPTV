@@ -3439,17 +3439,43 @@ def check_self_update(cfg, force=False):
     if not force and not cfg.get("self_update"):
         return None
     try:
-        # raw.githubusercontent 走 CDN，会拿到几十分钟前的旧清单；
-        # 加一个同批次的时间戳，保证 version.json 和 .sig 是同一版
+        # raw.githubusercontent 走 CDN，可能"清单是旧提交、签名是新提交"→ 必然验签失败。
+        # 所以：两个 CDN(raw + jsDelivr)各试两轮，每个来源都加时间戳，只认能验签通过的那一对。
         base = cfg["update_url"]
-        sep = "&" if "?" in base else "?"
-        bust = "%st=%d" % (sep, int(time.time()))
-        raw = _fetch_bytes(base + bust)
-        data = json.loads(raw.decode("utf-8", "ignore"))
-        try:
-            sig = _fetch_bytes(base + ".sig" + bust, 15)   # 64 字节二进制或十六进制文本都吃
-        except Exception:
-            sig = b""
+        bases = [base]
+        if "raw.githubusercontent.com/" in base:
+            try:
+                tail = base.split("raw.githubusercontent.com/", 1)[1]
+                owner_repo, rest = tail.split("/", 1)
+                repo, rest = rest.split("/", 1)
+                branch, path = rest.split("/", 1)
+                bases.append("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s" % (owner_repo, repo, branch, path))
+            except Exception:
+                pass
+        raw, sig, data = None, b"", None
+        for attempt in range(4):
+            for b in bases:
+                sep = "&" if "?" in b else "?"
+                bust = "%st=%d" % (sep, int(time.time() * 1000) + attempt)
+                try:
+                    raw = _fetch_bytes(b + bust)
+                    sig = _fetch_bytes(b + ".sig" + bust, 15)   # 64 字节二进制或十六进制文本都吃
+                except Exception:
+                    continue
+                try:
+                    data = json.loads(raw.decode("utf-8", "ignore"))
+                except Exception:
+                    continue
+                if not cfg.get("require_sig", True) or _verify_manifest(raw, sig):
+                    break
+                if attempt >= 1:
+                    log("升级源签名校验未通过(CDN 可能还没刷新)，换个来源再试")
+            else:
+                continue
+            break
+        if raw is None or data is None:
+            log("读取升级源失败")
+            return None
         if cfg.get("require_sig", True):
             if not (sig.strip() if isinstance(sig, (bytes, str)) else sig):
                 log("升级源缺少签名文件(version.json.sig)，按安全策略拒绝升级")
