@@ -3106,11 +3106,23 @@ def _fetch_bytes(url, timeout=15):
         return r.read()
 
 
-def _verify_manifest(raw, sig_hex):
-    """Ed25519 验签：raw=version.json 原始字节，sig_hex=64 字节签名的十六进制。"""
+def _verify_manifest(raw, sig):
+    """Ed25519 验签：raw=version.json 原始字节；sig 可以是 64 字节二进制，也可以是十六进制文本。"""
     try:
-        sig = bytes.fromhex("".join(sig_hex.split()))
+        if isinstance(sig, str):
+            txt = "".join(sig.split())
+            # 优先当十六进制解析；不是十六进制(比如读到了二进制签名)就按 latin-1 取回字节
+            try:
+                sig = bytes.fromhex(txt)
+            except ValueError:
+                sig = sig.encode("latin-1", "ignore")
+        sig = bytes(sig)
         pk = bytes.fromhex(UPDATE_PUBKEY_HEX)
+        if len(sig) != 64:
+            # 有些发布工具会把 64 字节签名存成 96/128 位十六进制文本
+            hexed = "".join(chr(b) for b in sig if 48 <= b <= 57 or 97 <= b <= 102 or 65 <= b <= 70)
+            if len(hexed) >= 64:
+                sig = bytes.fromhex(hexed[:128])
         return bool(checkvalid(sig, raw, pk))
     except Exception as e:
         log("验签异常: %s" % e)
@@ -3132,17 +3144,17 @@ def check_self_update(cfg, force=False):
         raw = _fetch_bytes(cfg["update_url"])
         data = json.loads(raw.decode("utf-8", "ignore"))
         try:
-            sig = _fetch_bytes(cfg["update_url"] + ".sig", 15).decode("ascii", "ignore")
+            sig = _fetch_bytes(cfg["update_url"] + ".sig", 15)   # 64 字节二进制或十六进制文本都吃
         except Exception:
-            sig = ""
+            sig = b""
         if cfg.get("require_sig", True):
-            if not sig.strip():
+            if not (sig.strip() if isinstance(sig, (bytes, str)) else sig):
                 log("升级源缺少签名文件(version.json.sig)，按安全策略拒绝升级")
                 return None
             if not _verify_manifest(raw, sig):
                 log("升级源签名校验失败，拒绝升级(升级源可能被篡改)")
                 return None
-        elif sig.strip() and not _verify_manifest(raw, sig):
+        elif sig and not _verify_manifest(raw, sig):
             log("升级源签名无效，拒绝升级")
             return None
         latest = str(data.get("version", ""))
