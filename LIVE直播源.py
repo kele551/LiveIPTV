@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.4.0  —— 本机直播源整理与控制台
+LIVE直播源 v1.4.1  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -71,7 +71,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
@@ -364,6 +364,9 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
       "Accept": "*/*", "Accept-Encoding": "identity"}
 
 
+_LOG_LOCK = threading.Lock()
+
+
 def log(msg):
     line = "[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
     print(line, flush=True)
@@ -375,8 +378,10 @@ def log(msg):
             except OSError:
                 pass
             LOG_PATH.rename(old)
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        # 多线程(探测/台标/吞吐复测)同时写会撕开多字节字符，写出半截乱码，加锁串起来
+        with _LOG_LOCK:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
     except OSError:
         pass
 
@@ -1294,7 +1299,7 @@ def parse_ts_video(data):
     return _VIDEO_STREAM_TYPES.get(stream_type, ""), 0, 0
 
 
-def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
+def probe_stream(e, timeout, budget=1.5, max_bytes=2621440, want_res=True):  # noqa: C901
     """一次连接同时判断：能不能连、是不是真流、能不能拉出画面、真实码率、分辨率。
 
     返回 (ok, ttfb_ms, note, mbps, res_h, speed)：
@@ -1317,6 +1322,9 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
             return False, 0, "TCP不可达", 0.0, 0, 0.0
     try:
         t0 = time.monotonic()
+        # 整条探测的硬时限：单次 socket 超时管不住"读 1.2MB 分片"那种慢速续传，
+        # 实测有地址单条卡了 131 秒(精选源补测那一步)，把整轮更新拖长。
+        hard = t0 + max(4.0, timeout * 2.0)
         resp = _open(url, timeout)
         ttfb = round((time.monotonic() - t0) * 1000)
         ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -1418,7 +1426,8 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         # 测速窗口至少 0.8 秒：命中"同服务器已知速度"时原来只有 0.35 秒，
         # 这段时间还夹着慢启动，测出来的吞吐比真实值低一大截(实测 8M 的台只剩 1M)。
         win = max(budget, 0.8)
-        while total < max_bytes and (t_read <= 0 or time.monotonic() - t_read < win):
+        while (total < max_bytes and time.monotonic() < hard
+               and (t_read <= 0 or time.monotonic() - t_read < win)):
             try:
                 b = resp.read(65536)
             except Exception:
@@ -1426,7 +1435,7 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
             if not b:
                 reached_eof = True
                 break
-            if not got_wh[1] and len(buf) < RES_STAGES[-1]:
+            if want_res and not got_wh[1] and len(buf) < RES_STAGES[-1]:
                 buf += b[:RES_STAGES[-1] - len(buf)]
             if t_read <= 0:
                 # 第一块只用来认内容(TLS 握手与慢启动都算在这块里)，不计入测速窗口
@@ -1435,7 +1444,7 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
                 t_read = time.monotonic()
                 continue
             total += len(b)
-            if not got_wh[1] and len(buf) >= RES_STAGES[stage]:
+            if want_res and not got_wh[1] and len(buf) >= RES_STAGES[stage]:
                 stage = min(stage + 1, len(RES_STAGES) - 1)
                 if buf[:4] == b"\x00\x00\x00" or b"ftyp" in buf[:64] or b"styp" in buf[:64]:
                     _c, _w, _h = parse_mp4_video(bytes(buf))
@@ -1450,10 +1459,11 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         # 分辨率补读：命中"同服务器已知速度"时测速窗口只有 0.35 秒，10M 的台才 400KB，
         # SPS 还没轮到就收摊了。这里再补读一小段专门找 SPS(最多 1.2 秒 / 1.6MB)，
         # 补读的字节不计入 total，不影响 speed 与码率口径。
-        if not got_wh[1] and not reached_eof:
+        if want_res and not got_wh[1] and not reached_eof:
             t_fix = time.monotonic()
             next_try = len(buf) + 300000
-            while time.monotonic() - t_fix < 1.2 and len(buf) < 1600000:
+            while (time.monotonic() - t_fix < 1.2 and len(buf) < 1600000
+                   and time.monotonic() < hard):
                 try:
                     b = resp.read(65536)
                 except Exception:
@@ -1499,12 +1509,12 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         # 真实分辨率：能有主清单 RESOLUTION 就用，没有就从码流里读 SPS。
         # 标称分辨率不可信(实测 "cctv8k" 的源其实是 1080p)，所以只认码流里读出来的。
         codec, _w, _h = got_codec or "", got_wh[0], got_wh[1]
-        if not _h:
+        if want_res and not _h:
             codec, _w, _h = parse_ts_video(bytes(buf)) if buf[:4] == b"\x47" else parse_mp4_video(bytes(buf))
-        if not _h and mediatxt:
+        if want_res and not _h and mediatxt:
             # ① fMP4/CMAF：分片里没有 moov，尺寸在 EXT-X-MAP 的初始化段里
             m = re.search(r'#EXT-X-MAP:.*?URI="([^"]+)"', mediatxt)
-            if m:
+            if m and time.monotonic() < hard:
                 try:
                     iu = urljoin(base_url, m.group(1))
                     with _open(iu, timeout) as ir:
@@ -1517,9 +1527,11 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
             # ② TS 里这一片恰好没有 SPS(IDR 稀疏/首片被切)：换清单里下一片再试一次
             if not _h:
                 for nxt, _d in _more_segments(mediatxt, base_url, 2):
+                    if time.monotonic() >= hard:
+                        break
                     try:
                         with _open(nxt, timeout) as nr:
-                            nb = nr.read(1200000)
+                            nb = nr.read(600000)
                         c3, w3, h3 = (parse_mp4_video(nb)
                                       if (nb[:4] == b"\x00\x00\x00" or b"ftyp" in nb[:64])
                                       else parse_ts_video(nb))
@@ -1865,6 +1877,8 @@ def _filter_logo(u):
     return u if any(h in u for h in LOGO_OK_HOSTS) else ""
 _LOGO_CACHE = {}              # url -> [unix_ts, ok]
 _LOGO_KIND = {}               # url -> white/dark/color（台标配色，决定要不要垫深色底）
+_LOGO_HASH = {}               # url -> 8×8 分桶指纹（发现"两个台用了同一张图"的错配）
+_LOGO_FP = {}                 # url -> 16×16 灰度细指纹（同一桶内再精确比对）
 _LOGO_BYTES = {}              # url -> (content_type, bytes)  台标本地中转缓存(最多 600 张)
 _LOGO_BYTES_MAX = 600
 LOGO_DIR = BASE / "logos"      # 台标图片本地留档：程序重启后 /logo 也不用再出网
@@ -1886,7 +1900,7 @@ def _save_logo_cache():
     except OSError:
         pass
 
-def _png_pixels(data):
+def _png_pixels(data, ncol=32):
     """极简 PNG 解码：只认 8 位的灰/RGB/调色板/RGBA(台标库实际就这几种)，
     产出 (宽, 高, [(r,g,b,a), ...] 采样后的像素)。解不动返回 None。
     用来判断台标是不是"透明底白图"——那种图放在浅色界面上等于看不见。"""
@@ -1935,7 +1949,7 @@ def _png_pixels(data):
     bpp = max(1, ch * bs)                # PNG 滤波按字节/像素算
     prev = bytearray(stride)
     out = []
-    step = max(1, w // 32)
+    step = max(1, w // ncol)
     p = 0
     for y in range(h):
         if p >= len(raw):
@@ -2014,6 +2028,125 @@ _LOGO_URL_OVERRIDE = {
     "香港台": "https://raw.githubusercontent.com/wanglindl/TVlogo/master/img/Phoenix3.png",
 }
 
+def logo_hash(data):
+    """粗指纹(8×8 灰度 aHash)：用来发现"两个不同频道用了同一张图"的错配。
+    上游图库确实有这种错误 —— 2026-10-21 用户报「黄金翡翠和亚洲剧台标一致」，
+    实测 CCSH 库里这两个名字是同一张 myTV SUPER 的图(字节不同、画面一模一样)。
+    8×8 只能用来分桶(央视那套"CCTV x"长得都像，光靠它会互相误伤)，细比看 logo_fp。
+    解不出(JPEG 等)返回 ""，这类跳过比对。"""
+    try:
+        got = _png_pixels(data, ncol=64)
+    except Exception:
+        return ""
+    return _hash_from_px(got) if got else ""
+
+
+def _gray_grid(got, nw, nh, bg=128):
+    """把解码后的像素采成 n×n 的灰度网格，返回 (总宽, 网格)。
+
+    透明部分按**中灰(128)**合成，不按白底：台标大半是"透明底白字"，按白底合成后
+    整张图只剩一片 255，两张不同的白字台标指纹就一模一样了(实测会把"江苏苏州文化生活"
+    和"法治天地"判成同一张，然后被去重逻辑误杀)。中灰底让白字有对比度，彩色台标不受影响。"""
+    w, _h, out = got
+    if not out or not w:
+        return 0, []
+    step = max(1, w // 64)
+    cols = len(range(0, w, step))
+    if cols <= 0:
+        return 0, []
+    rows = len(out) // cols
+    if rows <= 0:
+        return 0, []
+    grid = []
+    for gy in range(nh):
+        y = min(rows - 1, gy * rows // nh)
+        for gx in range(nw):
+            x = min(cols - 1, gx * cols // nw)
+            r, g, b, a = out[y * cols + x]
+            bgc = bg * (255 - a)
+            grid.append(((r * a + bgc) // 255 * 299 // 1000
+                         + (g * a + bgc) // 255 * 587 // 1000
+                         + (b * a + bgc) // 255 * 114 // 1000))
+    return w, grid
+
+
+def _hash_from_px(got):
+    """8×8 aHash：把灰度网格按中位数二值化成 64 位，用于分桶。"""
+    _w, gray = _gray_grid(got, 8, 8)
+    if not gray:
+        return ""
+    avg = sum(gray) // len(gray)
+    bits = 0
+    for v in gray:
+        bits = (bits << 1) | (1 if v > avg else 0)
+    return "%016x" % bits
+
+
+def logo_fp(data):
+    """细指纹(32×16 灰度值)：判"两张图是不是同一张画面"。解不出返回 ()。
+    采样密度必须够 —— 央视那套 CCTV1/2/3 只有小号数字不同，用 8×8/16×16 会全部判成同一张。"""
+    try:
+        got = _png_pixels(data, ncol=64)
+    except Exception:
+        return ()
+    if not got:
+        return ()
+    _w, grid = _gray_grid(got, 32, 16)
+    return tuple(grid)
+
+
+def _same_art(a, b):
+    """两枚指纹是不是同一张画面。阈值定得很紧，因为要的是"同一张图"而不是"长得像"：
+    实测(304 张随包台标)−−
+      同一张图(黄金翡翠 / 亚洲剧，上游把一张图挂了两个名字)：max=0   mean=0.00
+      不同频道(CCTV1 / CCTV2 只有小号数字不同)：          max=36  mean=1.12
+      CCTV1 / CCTV6：                                    max=40  mean=1.37
+    所以只有 max≤8 且平均差≤1.5 才算同一张：漏判只是不拦(不影响显示)，
+    误判会白掉正确台标，宁可漏不可错。"""
+    if not a or not b or len(a) != len(b):
+        return False
+    total = 0
+    for x, y in zip(a, b):
+        d = x - y if x > y else y - x
+        if d > 8:
+            return False
+        total += d
+    return total / len(a) <= 1.5
+
+
+def _name_related(a, b):
+    """两个频道名是不是"同一类"(同台不同写法、同城兄弟台)。基于名字相似度判断。
+    实测随包台标里被判"同一张图"的 9 组，除 黄金翡翠/亚洲剧 之外全都是同城兄弟台
+    (江苏苏州文化生活/生活资讯、浙江新闻/浙江公共新闻…)，它们的图本来就该一样，
+    所以相似度够高的直接放过，只拦"名字毫不相干、图却一模一样"的错配。"""
+    import difflib
+    na = a.replace(" ", "")
+    nb = b.replace(" ", "")
+    if not na or not nb:
+        return True
+    if na in nb or nb in na:
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.3
+
+
+def logo_props(data, url=""):
+    """一次解码同时拿到 (配色, 分桶指纹, 细指纹)：每张图只解一遍。"""
+    kind = ""
+    if url:
+        for _kw, _v in _LOGO_KIND_OVERRIDE.items():
+            if _kw in url:
+                kind = _v
+                break
+    try:
+        got = _png_pixels(data)
+    except Exception:
+        got = None
+    if not got:
+        return kind, "", ()
+    return ((kind or _kind_from_px(got)), _hash_from_px(got),
+            tuple(_gray_grid(got, 32, 16)[1]))
+
+
 def logo_kind(data, url=""):
     """台标配色归类：white=透明底白图(浅色界面上看不见，得垫深色)、
     dark=深色图形、color=彩图、""=判不出来(PNG 解不动/JPEG 等)。"""
@@ -2022,6 +2155,12 @@ def logo_kind(data, url=""):
             if _kw in url:
                 return _v
     got = _png_pixels(data)
+    if not got:
+        return ""
+    return _kind_from_px(got)
+
+
+def _kind_from_px(got):
     if not got:
         return ""
     _w, _h, px = got
@@ -2079,10 +2218,13 @@ def _check_logo(url, timeout=2):
             if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
                 _LOGO_BYTES.clear()
             _LOGO_BYTES[url] = ("image/png", body)
-            try:
-                _LOGO_KIND[url] = logo_kind(body, url)
-            except Exception:
-                pass
+            _k, _hs, _fp = logo_props(body, url)
+            if _k:
+                _LOGO_KIND[url] = _k
+            if _hs:
+                _LOGO_HASH[url] = _hs
+            if _fp:
+                _LOGO_FP[url] = _fp
             try:
                 LOGO_DIR.mkdir(parents=True, exist_ok=True)
                 (LOGO_DIR / _logo_file(url)).write_bytes(body)
@@ -2099,10 +2241,13 @@ def _check_logo(url, timeout=2):
         if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
             _LOGO_BYTES.clear()
         _LOGO_BYTES[url] = (ctype, body)
-        try:
-            _LOGO_KIND[url] = logo_kind(body, url)
-        except Exception:
-            pass
+        _k, _hs, _fp = logo_props(body, url)
+        if _k:
+            _LOGO_KIND[url] = _k
+        if _hs:
+            _LOGO_HASH[url] = _hs
+        if _fp:
+            _LOGO_FP[url] = _fp
         try:
             LOGO_DIR.mkdir(parents=True, exist_ok=True)
             (LOGO_DIR / _logo_file(url)).write_bytes(body)
@@ -2280,13 +2425,38 @@ def _lib_fuzzy(rel_lib, sub, cands, url_tpl):
     return url_tpl % quote(best) if best else ""
 
 
-def _resolve_logo_local(name):
-    """在离线图库里按频道名找台标：命中本地文件 = 100% 可用，零出网。
-    返回白名单 URL 或空串。顺序：别名表 -> 原名 -> 常见变体 -> 宽松兜底。"""
-    if not name:
-        return ""
-    lib = "cachemiao"          # 离线图库目录名
-    host = "cachemiao/m3u-logos"
+# 简体 -> 繁体（只收频道名里真会用到的字）。港台频道在图库、台标站里大多只有繁体名：
+# "亚洲剧"在简体名下拿到的是 myTV SUPER 的通用标，改成"亞洲劇台"才是这一台自己的标。
+_TRAD_S2T = {
+    "亚": "亞", "剧": "劇", "黄": "黃", "卫": "衛", "视": "視", "东": "東", "凤": "鳳",
+    "龙": "龍", "广": "廣", "贵": "貴", "济": "濟", "庆": "慶", "云": "雲", "苏": "蘇",
+    "华": "華", "辽": "遼", "宁": "寧", "陕": "陝", "晋": "晉", "内": "內", "粤": "粵",
+    "赣": "贛", "闽": "閩", "鲁": "魯", "沪": "滬", "琼": "瓊", "湾": "灣", "财": "財",
+    "经": "經", "纪": "紀", "录": "錄", "农": "農", "业": "業", "军": "軍", "综": "綜",
+    "艺": "藝", "戏": "戲", "儿": "兒", "动": "動", "画": "畫", "闻": "聞", "乐": "樂",
+    "体": "體", "务": "務", "车": "車", "产": "產", "装": "裝", "游": "遊", "钓": "釣",
+    "鱼": "魚", "宠": "寵", "养": "養", "资": "資", "讯": "訊", "线": "線", "网": "網",
+    "员": "員", "术": "術", "铁": "鐵", "银": "銀", "铜": "銅", "阳": "陽", "阴": "陰",
+    "门": "門", "问": "問", "长": "長", "张": "張", "马": "馬", "鸟": "鳥", "飞": "飛",
+    "轮": "輪", "红": "紅", "绿": "綠", "蓝": "藍", "镇": "鎮", "乡": "鄉", "县": "縣",
+    "区": "區", "园": "園", "书": "書", "学": "學", "汉": "漢", "语": "語", "说": "說",
+    "读": "讀", "讲": "講", "带": "帶", "时": "時", "间": "間", "钟": "鐘", "点": "點",
+    "号": "號", "毕": "畢", "兴": "興", "举": "舉", "办": "辦", "际": "際", "陆": "陸",
+    "岛": "島", "峡": "峽", "湾": "灣", "视": "視", "众": "眾", "亿": "億", "价": "價",
+    "传": "傳", "侨": "僑", "俩": "倆", "仓": "倉", "伞": "傘", "伦": "倫", "伟": "偉",
+}
+
+
+def _trad(s):
+    """简体名 -> 繁体名（没有对应字的原样保留）。"""
+    if not s:
+        return s
+    return "".join(_TRAD_S2T.get(c, c) for c in s)
+
+
+def _logo_cands(name):
+    """频道名 -> 图库里可能用的文件名候选。返回 (cands, n, n2, n3, n4)。
+    央视官方名(CCTV-1 综合)在图库里是 CCTV1.png 这一套；带 HD/台/频道的写法也要试。"""
     n = (name or "").strip()
     cands = [n]
     # 央视官方名 -> 图库文件名。台里改名叫"CCTV-1 综合"了，图库里还是 CCTV1.png 这一套
@@ -2308,6 +2478,22 @@ def _resolve_logo_local(name):
     for v in (n2, n3, n4):
         if v and v not in cands:
             cands.append(v)
+    # 繁体写法再补一轮：港台频道在台标站/图库里基本只收繁体名（亚洲剧 -> 亞洲劇台）
+    for b in list(cands):
+        t = _trad(b)
+        if t != b and t not in cands:
+            cands.append(t)
+    return cands, n, n2, n3, n4
+
+
+def _resolve_logo_local(name):
+    """在离线图库里按频道名找台标：命中本地文件 = 100% 可用，零出网。
+    返回白名单 URL 或空串。顺序：别名表 -> 原名 -> 常见变体 -> 宽松兜底。"""
+    if not name:
+        return ""
+    lib = "cachemiao"          # 离线图库目录名
+    host = "cachemiao/m3u-logos"
+    cands, n, n2, n3, n4 = _logo_cands(name)
     # 别名表也参与变体匹配(原名带 HD/后缀时精确查会 miss，如"凤凰香港 HD"->凤凰香港)
     for v in cands:
         al = LOGO_ALIASES.get(v)
@@ -2356,6 +2542,100 @@ def _resolve_logo_local(name):
     return ""
 
 
+# 本地图库里没有的台标，按名字去这三个白名单库再要一次（实测 200 + 图片魔数才用）。
+# 用户 2026-10-21 报「云南卫视台标不显示」的根因就是：离线库是某次同步的快照，
+# 新出现的频道本地没文件，而当时没有"按名字上网要一次"的兜底，于是一直空着。
+# 命中后 _check_logo 会把图存进 LOGO_DIR，下次直接走本地，不用再出网。
+LOGO_NET_TPLS = (
+    # 用户 2026-10-21 给的台标站（4 万枚，带别名匹配：给"亞洲劇台"能直接对上"亚洲剧"）
+    "https://v.999.team/logo.php?name={n}",
+    "https://cdn.jsdelivr.net/gh/cachemiao/m3u-logos@main/tv/{n}.png",
+    "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/{n}.png",
+    "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/{n}.png",
+    "https://raw.githubusercontent.com/cachemiao/m3u-logos/main/tv/{n}.png",
+    "https://raw.githubusercontent.com/wanglindl/TVlogo/main/img/{n}.png",
+)
+_LOGO_MISS = {}               # 频道名 -> 第一次全库都没找到的时间(6 小时内不再重复找)
+LOGO_MISS_TTL = 6 * 3600
+# 一轮更新里最多出网试这么多次：实测不设上限时，缺图的 100 多个台会把台标这一步
+# 从 2 秒拖到 260 秒(整轮 167s -> 388s)。缺的图每轮补一点，几轮之后就都进本地库了。
+_LOGO_NET_BUDGET = [0]
+LOGO_NET_MAX = 90
+
+
+def _resolve_logo_net(name):
+    """离线库没有时，按名字去白名单图库要一次。返回可用的白名单 URL 或 ""。
+    结果走 _LOGO_CACHE(7 天)，失败记 _LOGO_MISS(6 小时)，避免每轮对着同几个台反复出网。"""
+    if not name:
+        return ""
+    miss = _LOGO_MISS.get(name)
+    if miss and time.time() - miss < LOGO_MISS_TTL:
+        return ""
+    cands, _n, n2, n3, n4 = _logo_cands(name)
+    # 只试最像的几个写法 + 前三个模板(台标站 + 两个 jsDelivr，国内都可达)，别把整张表跑一遍。
+    # 繁体写法必须带上：港台频道在台标站里只认繁体名。
+    probe = []
+    for v in cands[:3] + [_trad(name), _trad(name) + "台"]:
+        if v and v not in probe:
+            probe.append(v)
+    probe = probe[:5]
+    for v in probe:
+        for tpl in LOGO_NET_TPLS[:3]:
+            if _LOGO_NET_BUDGET[0] >= LOGO_NET_MAX:
+                return ""
+            u = tpl.format(n=quote(v))
+            ent = _LOGO_CACHE.get(u)
+            if ent:
+                if time.time() - ent[0] < LOGO_TTL:
+                    if ent[1]:
+                        return u
+                    continue
+            _LOGO_NET_BUDGET[0] += 1
+            ok = _check_logo(u, timeout=1.2)
+            _LOGO_CACHE[u] = [time.time(), ok]
+            if ok:
+                return u
+    _LOGO_MISS[name] = time.time()
+    return ""
+
+
+def _logo_alt(name, avoid_fps):
+    """给"跟别的台共用同一张画面"的频道另找一张图：按繁体/别名写法逐个试台标站。
+    avoid_fps 里已有的画面一律不收。找到返回 (url, kind)，找不到返回 ("", "")。
+    用户 2026-10-21 报「黄金翡翠和亚洲剧台标一致」：简体的"亚洲剧"在库里就是通用
+    myTV SUPER 标，繁体"亞洲劇台"才是这一台自己的标。"""
+    if not name:
+        return "", ""
+    cands, _n, _n2, _n3, _n4 = _logo_cands(name)
+    probe = []
+    for v in [_trad(name), _trad(name) + "台", _trad(name) + "頻道"] + cands[:2]:
+        if v and v not in probe:
+            probe.append(v)
+    for v in probe[:5]:
+        for tpl in LOGO_NET_TPLS[:2]:
+            if _LOGO_NET_BUDGET[0] >= LOGO_NET_MAX:
+                return "", ""
+            u = tpl.format(n=quote(v))
+            got = _logo_from_disk(u)
+            if got is None:
+                _LOGO_NET_BUDGET[0] += 1
+                if not _check_logo(u, timeout=1.5):
+                    continue
+                got = _logo_from_disk(u)
+            if got is None:
+                continue
+            kind, hsum, fp = logo_props(got[1], u)
+            if not fp or not hsum:
+                continue
+            if any(_same_art(fp, x) for x in avoid_fps):
+                continue
+            _LOGO_KIND[u] = kind or ""
+            _LOGO_HASH[u] = hsum
+            _LOGO_FP[u] = fp
+            return u, kind or ""
+    return "", ""
+
+
 def resolve_logo(name, src_logo):
     """台标候选链：离线图库(名字直查，零出网) -> 图库别名 -> 源自带的白名单图。
     全部只出白名单两库，结果必须可验证(本地文件在/网络实测 200)才采用。"""
@@ -2377,6 +2657,10 @@ def resolve_logo(name, src_logo):
                 return u
     # 1) 离线图库直查(优先，秒回且永不出错)
     u = _resolve_logo_local(name)
+    if u:
+        return u
+    # 1.5) 离线库没有这个台：按名字去白名单图库要一次，命中就存盘，下次走本地
+    u = _resolve_logo_net(name)
     if u:
         return u
     # 2) 源自带的台标：只接受白名单两库，且必须能从本地磁盘或网络验证
@@ -2527,16 +2811,45 @@ class Updater:
                             plan.append(cand)
             if not plan:
                 plan = list(urls)
-            for u in plan:
+
+            def _grab(u):
                 try:
                     with urllib.request.urlopen(urllib.request.Request(u, headers=UA),
                                                 timeout=8, context=_SSL_CTX) as r:
                         t = r.read().decode("utf-8", "ignore")
-                    if t and "#EXTINF" in t:
-                        text, used = t, u
-                        break
+                    return t if (t and "#EXTINF" in t) else None
                 except Exception:
-                    continue
+                    return None
+
+            # 前三条候选并发抢，谁先回来用谁：原来是一条一条等，不通的地址每个白等 8 秒，
+            # 一个源就能磨掉半分钟(用户反馈"更新太慢"主要就耗在这里和探测上)。
+            if len(plan) > 1:
+                got = {}
+                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(plan)))
+                try:
+                    futs = {_ex.submit(_grab, u): i for i, u in enumerate(plan[:3])}
+                    for f in concurrent.futures.as_completed(futs):
+                        try:
+                            r_ = f.result()
+                        except Exception:
+                            r_ = None
+                        if r_:
+                            got[futs[f]] = r_
+                            if futs[f] == 0:
+                                break      # 第一个候选就通了，剩下的不用等
+                finally:
+                    _ex.shutdown(wait=False)
+                for i in sorted(got):
+                    text, used = got[i], plan[i]
+                    break
+            for u in plan:
+                if text:
+                    break
+                if len(plan) > 1 and u in plan[:3]:
+                    continue           # 前三候选已经在上面抢过了
+                r_ = _grab(u)
+                if r_:
+                    text, used = r_, u
             n = 0
             es = []
             if text:
@@ -2736,7 +3049,10 @@ class Updater:
         # - 已经有一个地址成功过 → 后面的只做"能不能出画面"的快速确认(0.35s 窗口)
         host_fail, host_ok, host_speed = {}, set(), {}
 
+        durs = []                      # 每个地址花了多久(排查"更新太慢"用)
+
         def work(u):
+            _t = time.monotonic()
             recs = by_url[u]
             hp = hp_of(u)
             with lock:
@@ -2750,7 +3066,8 @@ class Updater:
                     self.state["done"] = counter[0]
                 return
             ok, ttfb, note, mbps, res_h, speed = probe_stream(
-                recs[0], timeout=2.5, budget=(0.35 if hint else 1.5))
+                recs[0], timeout=2.5, budget=(0.35 if hint else 1.5),
+                want_res=not recs[0].get("res"))
             if hint and (not speed or speed < hint):
                 speed = hint
             with lock:
@@ -2778,6 +3095,7 @@ class Updater:
             with lock:
                 counter[0] += 1
                 self.state["done"] = counter[0]
+                durs.append((time.monotonic() - _t, ok))
 
         # 一个线程池跑完：分批建池会让每批都重新起几百个线程，白白多花十几秒
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -2792,7 +3110,8 @@ class Updater:
             t1 = time.monotonic()
             def work2(u):
                 recs = by_url[u]
-                ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=8, budget=2.5)
+                ok, ttfb, note, mbps, res_h, speed = probe_stream(
+                    recs[0], timeout=8, budget=2.5, want_res=not recs[0].get("res"))
                 if ok:
                     for sl in recs:
                         sl["live"], sl["ttfb"], sl["note"] = True, ttfb, ""
@@ -2815,7 +3134,8 @@ class Updater:
             t2 = time.monotonic()
             def work3(u):
                 recs = by_url[u]
-                ok, ttfb, note, mbps, res_h, speed = probe_stream(recs[0], timeout=8, budget=2.0)
+                ok, ttfb, note, mbps, res_h, speed = probe_stream(
+                    recs[0], timeout=8, budget=2.0, want_res=not recs[0].get("res"))
                 if ok:
                     for sl in recs:
                         sl["live"], sl["ttfb"], sl["note"] = True, ttfb, ""
@@ -2833,6 +3153,12 @@ class Updater:
         n_ok = sum(1 for u in order if by_url[u][0]["live"])
         log("探测完成: %d 个地址里 %d 个能出画面(%.0fs；跳过 %d 个已知不通的、%d 个上次在用)"
             % (len(order), n_ok, time.monotonic() - t0, n_skip, len(prev & set(order))))
+        if durs:
+            _dt = sorted(d for d, _o in durs)
+            _p = lambda q: _dt[min(len(_dt) - 1, int(len(_dt) * q))]   # noqa: E731
+            _slow = sum(1 for d, _o in durs if d >= 2.5)
+            log("  单地址耗时: 中位 %.1fs / 90%% %.1fs / 最慢 %.1fs；%d 个超过 2.5s(失败居多)"
+                % (_p(0.5), _p(0.9), _dt[-1], _slow))
         _save_bad_urls()
 
         # 记下每个服务器的成/败，下一轮直接跳过长期不通的(省时间，也少扰民)
@@ -2853,6 +3179,7 @@ class Updater:
         if not todo:
             return
         self.state.update(phase="解析台标", done=0, total=len(todo))
+        _LOGO_NET_BUDGET[0] = 0         # 每轮给"上网补缺台标"一个额度，防止把整轮拖慢
         cnt = [0]
 
         def one(item):
@@ -2882,12 +3209,81 @@ class Updater:
                     _check_logo(u)
                     kind = _LOGO_KIND.get(u)
                 else:
-                    kind = logo_kind(got[1], u)
+                    kind, hsum, hfp = logo_props(got[1], u)
                     if kind:
                         _LOGO_KIND[u] = kind
+                    if hsum:
+                        _LOGO_HASH[u] = hsum
+                    if hfp:
+                        _LOGO_FP[u] = hfp
             ch["logo_kind"] = kind or ""
+        # 错配拦截：上游图库会把别的台的图挂到这个名字上(实测 CCSH 库里"亚洲剧"和
+        # "黄金翡翠"是同一张 myTV SUPER 的图，字节不同、画面一模一样)。两个不同频道
+        # 用了同一张画面时，只留名字更完整的那个，另一个宁可不显示(界面会退回文字方块)，
+        # 也不显示错的台标。先用 8×8 分桶，再在桶内用 16×16 细指纹确认是不是同一张。
+        items = []
+        for _k, ch in todo:
+            u = ch.get("logo") or ""
+            if not u:
+                continue
+            hsum, hfp = _LOGO_HASH.get(u), _LOGO_FP.get(u)
+            if not hfp:
+                got = _logo_from_disk(u)
+                if got is not None:
+                    _k2, hsum2, hfp2 = logo_props(got[1], u)
+                    hsum = hsum or hsum2
+                    if hsum2:
+                        _LOGO_HASH[u] = hsum2
+                    if hfp2:
+                        _LOGO_FP[u] = hfp2
+                        hfp = hfp2
+            if hfp:
+                items.append((ch, hsum, hfp))
+        kept = {}
+        n_dup = 0
+        blanked = []
+        for ch, hsum, hfp in sorted(items, key=lambda it: (-len(it[0]["name"]), it[0]["name"])):
+            bucket = kept.setdefault(hsum, [])
+            hit = None
+            for ch_b, fp_b in bucket:
+                if not _same_art(hfp, fp_b):
+                    continue
+                # 同一个台的不同写法(翡翠台 / 翡翠台HD、同城兄弟台)共用一张图是对的
+                if _name_related(ch["name"], ch_b["name"]):
+                    continue
+                hit = ch_b
+                break
+            if hit is None:
+                bucket.append((ch, hfp))
+                continue
+            # 先别急着清空：换成繁体/别名再找一次，能拿到"不是同一画面"的真台标就留着
+            avoid = [fp_b for _x2, fp_b in bucket] + [hfp]
+            u2, k2 = _logo_alt(ch["name"], avoid)
+            if u2:
+                ch["logo"], ch["logo_kind"] = u2, k2
+                got2 = _logo_from_disk(u2)
+                fp2 = _LOGO_FP.get(u2)
+                if not fp2 and got2 is not None:
+                    _k3, _h3, fp2 = logo_props(got2[1], u2)
+                if fp2:
+                    bucket.append((ch, fp2))
+                    continue
+            # 名字毫不相干却共用同一张画面 —— 这张图对这俩来说都是错的，
+            # 两边都不显示(界面退回"黄"这种文字方块)，比显示别人的台标强。
+            for _x in (ch, hit):
+                if _x.get("logo"):
+                    _x["logo"], _x["logo_kind"] = "", ""
+                    blanked.append(_x["name"])
+            if hit in bucket:
+                bucket.remove(hit)
+            n_dup = len(blanked)
+        if blanked:
+            log("台标去重: %s(同一张图挂了多个台，宁可不显示)" % "、".join(blanked[:6]))
         n_logo = sum(1 for _, ch in todo if ch["logo"])
-        log("台标解析完成: %d/%d 频道有台标(%.0fs)" % (n_logo, len(todo), time.monotonic() - t_logo0))
+        log("台标解析完成: %d/%d 频道有台标(%.0fs%s%s)"
+            % (n_logo, len(todo), time.monotonic() - t_logo0,
+               "，本轮补图 %d 次" % _LOGO_NET_BUDGET[0] if _LOGO_NET_BUDGET[0] else "",
+               "，拦下 %d 个重复台标" % n_dup if n_dup else ""))
 
     # ---------- 组装 ----------
     @staticmethod
@@ -3100,7 +3496,6 @@ class Updater:
             tray_busy(False)     # 不管成功失败，都换回"三角"
             self.state["updating"] = False
 
-    @staticmethod
     def net_pass(self, channels):
         """更新完再补一轮"只看吞吐"的实测：整轮探测是 64 路并发跑的，
         每路分到的带宽被摊薄，测出来的吞吐普遍偏低(实测同一地址单跑 1126KB/s、
@@ -3493,8 +3888,10 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 62px;display:flex;flex-dir
 .lg{display:flex;align-items:center;justify-content:center;width:104px;height:40px;
   max-width:104px;min-width:104px;border-radius:6px;flex:0 0 auto;overflow:hidden;padding:0 3px}
 .lg img{width:100%;height:100%;object-fit:contain}
-.lg.dk{background:transparent;box-shadow:none}
-.lg.dk img{filter:brightness(0) saturate(0);opacity:.46}
+/* 透明底白图（央视全系、湖北卫视这类）：直接放白卡上等于看不见。
+   统一垫一块深色底，白字/彩标都清楚；不做灰度/降低透明度，否则会"发灰看不清" */
+.lg.dk{background:#2b3240;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+.lg.dk img{filter:none;opacity:1;padding:2px 0}
 .ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
   display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}

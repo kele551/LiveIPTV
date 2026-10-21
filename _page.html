@@ -106,8 +106,10 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 62px;display:flex;flex-dir
 .lg{display:flex;align-items:center;justify-content:center;width:104px;height:40px;
   max-width:104px;min-width:104px;border-radius:6px;flex:0 0 auto;overflow:hidden;padding:0 3px}
 .lg img{width:100%;height:100%;object-fit:contain}
-.lg.dk{background:transparent;box-shadow:none}
-.lg.dk img{filter:brightness(0) saturate(0);opacity:.46}
+/* 透明底白图（央视全系、湖北卫视这类）：直接放白卡上等于看不见。
+   统一垫一块深色底，白字/彩标都清楚；不做灰度/降低透明度，否则会"发灰看不清" */
+.lg.dk{background:#2b3240;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+.lg.dk img{filter:none;opacity:1;padding:2px 0}
 .ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
   display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}
