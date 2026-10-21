@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.3.0  —— 本机直播源整理与控制台
+LIVE直播源 v1.4.0  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -71,7 +71,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
@@ -886,6 +886,414 @@ def _is_fake_target(final_url):
     return any(k in low for k in FAKE_PATH_KW)
 
 
+# ------------------------------------------------------------------ 实测分辨率
+# 为什么要自己解析：标称分辨率（频道名/URL 里的 1080P、4K）根本不可信 ——
+# 实测过 107.150.52.50 的 "cctv4k/cctv8k" 两条源，真实画面是 1920x1080 的 H.264；
+# 而 湖南卫视 那条 3840x2160 的 HEVC 只有 1.4 Mbps。只有从码流本身读出宽高才作数。
+# 做法：TS 分片 -> PAT 找 PMT -> PMT 找视频 PID 与编码类型 -> 收集 PES 载荷 ->
+# 找 SPS(H.264 NAL=7 / HEVC NAL=33) -> 按标准语法解出宽高(含 conformance crop)。
+_AUDIO_STREAM_TYPES = {0x03, 0x04, 0x0F, 0x11, 0x81, 0x82, 0x87, 0x88}
+_VIDEO_STREAM_TYPES = {0x1B: "H.264", 0x24: "HEVC", 0x02: "MPEG-2", 0x01: "MPEG-1",
+                       0x10: "MPEG-4", 0x42: "AVS2", 0xD2: "AVS2", 0xD4: "AVS3",
+                       0x21: "JPEG", 0xEA: "VC-1"}
+
+
+class _BitReader:
+    """按位读比特流（SPS 解析用）。"""
+
+    def __init__(self, buf, byte_pos=0):
+        self.b = buf
+        self.p = byte_pos * 8
+
+    def bit(self):
+        i = self.p >> 3
+        if i >= len(self.b):
+            raise IndexError
+        v = (self.b[i] >> (7 - (self.p & 7))) & 1
+        self.p += 1
+        return v
+
+    def bits(self, n):
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | self.bit()
+        return v
+
+    def ue(self):
+        z = 0
+        while self.bit() == 0:
+            z += 1
+            if z > 32:
+                raise ValueError("ue too long")
+        return (1 << z) - 1 + self.bits(z)
+
+    def se(self):
+        v = self.ue()
+        return (v + 1) // 2 if v % 2 else -(v // 2)
+
+    def skip(self, n):
+        self.p += n
+
+
+def _nal_unescape(nal):
+    """去掉防竞争字节 00 00 03 -> 00 00。"""
+    out = bytearray()
+    i, n = 0, len(nal)
+    while i < n:
+        if i + 2 < n and nal[i] == 0 and nal[i + 1] == 0 and nal[i + 2] == 3:
+            out += b"\x00\x00"
+            i += 3
+            continue
+        out.append(nal[i])
+        i += 1
+    return bytes(out)
+
+
+def _nal_units(payload):
+    """按起始码切出 NAL 单元，返回 [(首字节, 原始字节)]。
+    用 bytes.find 找起始码(C 速度)：几百 KB 的分片逐字节扫太慢，会把整轮更新拖成几分钟。"""
+    starts = []
+    i, n = 0, len(payload)
+    find = payload.find
+    while i + 3 < n:
+        j = find(b"\x00\x00\x01", i)
+        if j < 0:
+            break
+        starts.append(j + 3)
+        i = j + 3
+    out = []
+    for k, s in enumerate(starts):
+        e = starts[k + 1] - 3 if k + 1 < len(starts) else n
+        if e > s:
+            out.append((payload[s], payload[s:e]))
+    return out
+
+
+def _h264_sps_size(rbsp):
+    """H.264 SPS -> (宽, 高)。"""
+    br = _BitReader(rbsp, 1)
+    profile = br.bits(8)
+    br.bits(8)
+    br.bits(8)
+    br.ue()
+    if profile in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134):
+        chroma = br.ue()
+        if chroma == 3:
+            br.bit()
+        br.ue()
+        br.ue()
+        br.bit()
+        if br.bit():
+            for i in range(8 if chroma != 3 else 12):
+                if br.bit():
+                    last, nxt = 8, 8
+                    for _ in range(16 if i < 6 else 64):
+                        if nxt:
+                            nxt = (last + br.se() + 256) % 256
+                        last = nxt or last
+    br.ue()
+    poc = br.ue()
+    if poc == 0:
+        br.ue()
+    elif poc == 1:
+        br.bit()
+        br.se()
+        br.se()
+        for _ in range(br.ue()):
+            br.se()
+    br.ue()
+    br.bit()
+    w_mbs = br.ue() + 1
+    h_map = br.ue() + 1
+    frame_only = br.bit()
+    if not frame_only:
+        br.bit()
+    br.bit()
+    cl = cr = ct = cb = 0
+    if br.bit():
+        cl, cr, ct, cb = br.ue(), br.ue(), br.ue(), br.ue()
+    w = w_mbs * 16 - (cl + cr) * 2
+    h = (2 - frame_only) * h_map * 16 - (ct + cb) * 2 * (2 - frame_only)
+    return w, h
+
+
+def _hevc_sps_size(rbsp):
+    """HEVC SPS -> (宽, 高)。"""
+    br = _BitReader(rbsp, 2)
+    br.bits(4)
+    sub = br.bits(3)
+    br.bit()
+    br.bits(2 + 1 + 5)      # profile_space/tier/profile_idc
+    br.bits(32)             # compatibility flags
+    br.bits(48)             # constraint flags
+    br.bits(8)              # level_idc
+    prof = []
+    for _ in range(sub):
+        prof.append(br.bit())
+        br.bit()
+    if sub > 0:
+        for _ in range(sub, 8):
+            br.bits(2)
+    for pf in prof:
+        if pf:
+            br.skip(88)
+    br.ue()                 # sps id
+    chroma = br.ue()
+    if chroma == 3:
+        br.bit()
+    w = br.ue()
+    h = br.ue()
+    if br.bit():            # conformance_window_flag
+        l, r, t, b = br.ue(), br.ue(), br.ue(), br.ue()
+        sx, sy = (2, 2) if chroma == 1 else ((2, 1) if chroma == 2 else (1, 1))
+        w -= (l + r) * sx
+        h -= (t + b) * sy
+    return w, h
+
+
+def _mp4_boxes(data, start=0, end=None):
+    """遍历 ISO-BMFF(MP4) box，产出 (类型, 载荷字节)。"""
+    end = len(data) if end is None else end
+    i = start
+    while i + 8 <= end:
+        size = int.from_bytes(data[i:i + 4], "big")
+        typ = data[i + 4:i + 8]
+        head = 8
+        if size == 1:
+            if i + 16 > end:
+                break
+            size = int.from_bytes(data[i + 8:i + 16], "big")
+            head = 16
+        elif size == 0:
+            size = end - i
+        if size < head or i + size > end:
+            break
+        yield typ, data[i + head:i + size]
+        i += size
+
+
+def parse_mp4_video(data):
+    """从 fMP4/CMAF 的 moov 里读 (编码, 宽, 高)。
+    分辨率在 tkhd 的 width/height(16.16 定点)；编码看 stsd 里的 sample entry 类型。
+    媒体分片(.m4s)本身没有 moov，必须把 EXT-X-MAP 的初始化段一起传进来。"""
+    if not data or b"moov" not in data[:400000] and b"moov" not in data:
+        return "", 0, 0
+    codec, w, h = "", 0, 0
+    for typ, moov in _mp4_boxes(data):
+        if typ != b"moov":
+            continue
+        for t2, trak in _mp4_boxes(moov):
+            if t2 != b"trak":
+                continue
+            cw = ch_ = 0
+            trak_codec = ""
+            for t3, p3 in _mp4_boxes(trak):
+                if t3 == b"tkhd":
+                    ver = p3[0] if p3 else 0
+                    off = 76 if ver == 0 else 88
+                    if len(p3) >= off + 8:
+                        cw = int.from_bytes(p3[off:off + 4], "big") >> 16
+                        ch_ = int.from_bytes(p3[off + 4:off + 8], "big") >> 16
+                elif t3 == b"mdia":
+                    for t4, p4 in _mp4_boxes(p3):
+                        if t4 != b"minf":
+                            continue
+                        for t5, stbl in _mp4_boxes(p4):
+                            if t5 != b"stbl":
+                                continue
+                            for t6, stsd in _mp4_boxes(stbl):
+                                if t6 != b"stsd":
+                                    continue
+                                for t7, entry in _mp4_boxes(stsd, 8):
+                                    name = entry[:4]
+                                    if name in (b"avc1", b"avc3", b"hvc1", b"hev1",
+                                                b"av01", b"mp4v", b"vp09"):
+                                        trak_codec = {
+                                            b"avc1": "H.264", b"avc3": "H.264",
+                                            b"hvc1": "HEVC", b"hev1": "HEVC",
+                                            b"av01": "AV1", b"mp4v": "MPEG-4",
+                                            b"vp09": "VP9"}[name]
+                                        # sample entry 里 avcC/hvcC 还带一份 SPS，tkhd 没尺寸时补
+                                        if cw <= 0:
+                                            for t8, p8 in _mp4_boxes(entry, 78):
+                                                if t8 == b"avcC" and len(p8) > 7:
+                                                    try:
+                                                        n = p8[5] & 0x1F
+                                                        sps = p8[6:6 + n]
+                                                        _cw2, _h2 = _h264_sps_size(_nal_unescape(sps))
+                                                        cw, ch_ = _cw2, _h2
+                                                    except Exception:
+                                                        pass
+            if cw > 0 and ch_ > 0:
+                return trak_codec or codec, cw, ch_
+            if trak_codec and not codec:
+                codec = trak_codec
+    return codec, 0, 0
+
+
+def _more_segments(text, base, limit=2):
+    """清单里除第一片之外的后续分片(按出现顺序，最多 limit 个)，用来换一片再找 SPS。"""
+    out = []
+    dur = 0.0
+    seen = 0
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("#EXTINF:"):
+            try:
+                dur = float(s[8:].split(",")[0].strip())
+            except Exception:
+                dur = 0.0
+            continue
+        if s.startswith("#"):
+            continue
+        pure = s.split("?", 1)[0].split("#", 1)[0].lower()
+        if not pure.endswith((".ts", ".m4s", ".mp4")):
+            continue
+        seen += 1
+        if seen == 1:
+            continue                      # 第一片已经在主循环里读过了
+        out.append((urljoin(base, s), dur))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _mpeg2_seq_size(rbsp):
+    """MPEG-2 序列头(0xB3) -> (宽, 高)。IPTV 里还有一批老 MPEG-2 编码的卫视。"""
+    br = _BitReader(rbsp, 1)          # 跳过 0xB3 本身
+    w = br.bits(12)
+    h = br.bits(12)
+    return w, h
+
+
+def parse_ts_video(data):
+    """从 TS 分片字节里读出 (编码, 宽, 高)。读不出来返回 ("", 0, 0)，绝不给猜的数字。"""
+    if not data or len(data) < 1880 or data[0] != 0x47:
+        return "", 0, 0
+    pkt = 188
+    pmt_pid = video_pid = stream_type = -1
+    audio_pids = set()
+    for off in range(0, min(len(data), pkt * 4000), pkt):
+        p = data[off:off + pkt]
+        if len(p) < pkt or p[0] != 0x47:
+            continue
+        if ((p[1] & 0x1F) << 8) | p[2] != 0:
+            continue
+        afc = (p[3] >> 4) & 3
+        pos = 4
+        if afc & 2:
+            pos += 1 + p[4]
+        if not (afc & 1) or pos >= pkt:
+            continue
+        sec = p[pos + 1 + p[pos]:]
+        if len(sec) > 8 and sec[0] == 0x00:
+            slen = ((sec[1] & 0x0F) << 8) | sec[2]
+            body = sec[8:3 + slen - 4]
+            for i in range(0, len(body) - 3, 4):
+                if (body[i] << 8) | body[i + 1]:
+                    pmt_pid = ((body[i + 2] & 0x1F) << 8) | body[i + 3]
+                    break
+        if pmt_pid >= 0:
+            break
+    if pmt_pid < 0:
+        return "", 0, 0
+    for off in range(0, min(len(data), pkt * 4000), pkt):
+        p = data[off:off + pkt]
+        if len(p) < pkt or p[0] != 0x47:
+            continue
+        if ((p[1] & 0x1F) << 8) | p[2] != pmt_pid:
+            continue
+        afc = (p[3] >> 4) & 3
+        pos = 4
+        if afc & 2:
+            pos += 1 + p[4]
+        if not (afc & 1) or pos >= pkt:
+            continue
+        sec = p[pos + 1 + p[pos]:]
+        if len(sec) < 12 or sec[0] != 0x02:
+            continue
+        slen = ((sec[1] & 0x0F) << 8) | sec[2]
+        pinfo = ((sec[10] & 0x0F) << 8) | sec[11]
+        body = sec[12 + pinfo:3 + slen - 4]
+        for i in range(0, len(body) - 4, 5):
+            st = body[i]
+            epid = ((body[i + 1] & 0x1F) << 8) | body[i + 2]
+            if st in _VIDEO_STREAM_TYPES:
+                if video_pid < 0:
+                    stream_type, video_pid = st, epid
+            elif st in _AUDIO_STREAM_TYPES:
+                audio_pids.add(epid)
+        if video_pid >= 0:
+            break
+    if video_pid < 0:
+        # 私有封装(实测 CCTV3 / CCTV-5+ 的 PMT 里只写 0x8B / 0xE0，没写视频流)：
+        # 认不出类型时就拿"包最多的那个 PID"当视频，三种编码各试一遍
+        cnt = {}
+        for off in range(0, len(data), pkt):
+            q = data[off:off + pkt]
+            if len(q) < pkt or q[0] != 0x47:
+                continue
+            pid = ((q[1] & 0x1F) << 8) | q[2]
+            if pid in (0, 0x11, 0x1FFF, pmt_pid) or pid in audio_pids:
+                continue
+            cnt[pid] = cnt.get(pid, 0) + 1
+        if not cnt:
+            return "", 0, 0
+        video_pid = max(cnt, key=lambda k: cnt[k])
+        stream_type = 0
+    buf = bytearray()
+    for off in range(0, len(data), pkt):
+        p = data[off:off + pkt]
+        if len(p) < pkt or p[0] != 0x47:
+            break
+        if ((p[1] & 0x1F) << 8) | p[2] != video_pid:
+            continue
+        afc = (p[3] >> 4) & 3
+        pos = 4
+        if afc & 2:
+            pos += 1 + p[4]
+        if not (afc & 1) or pos >= pkt:
+            continue
+        payload = p[pos:]
+        if (p[1] >> 6) & 1:          # PES 起始：跳过 PES 头
+            if len(payload) >= 9 and payload[:3] == b"\x00\x00\x01":
+                payload = payload[9 + payload[8]:]
+            else:
+                continue
+        buf += payload
+        # 只收视频载荷，但别太小气：SPS/IDR 大概每 1~2 秒才来一次，
+        # 原来 300KB(10M 码率只有 0.24 秒)常常整段都碰不到 SPS，分辨率就白读了。
+        if len(buf) > 3000000:
+            break
+    if not buf:
+        return "", 0, 0
+    # 按 PMT 给的编码优先，认不出来就把 H.264 / HEVC / MPEG-2 都试一遍
+    order = {0x1B: ("H.264", "HEVC", "MPEG-2"), 0x24: ("HEVC", "H.264", "MPEG-2"),
+             0x02: ("MPEG-2", "H.264"), 0x42: ("AVS2", "H.264"), 0xD2: ("AVS2", "H.264"),
+             0xD4: ("AVS3", "HEVC")}.get(stream_type, ("H.264", "HEVC", "MPEG-2"))
+    nals = _nal_units(bytes(buf))
+    for want in order:
+        for first, raw in nals:
+            try:
+                if want == "H.264" and (first & 0x1F) == 7:
+                    w, h = _h264_sps_size(_nal_unescape(raw))
+                    if w > 0 and h > 0:
+                        return want, w, h
+                elif want == "HEVC" and ((first >> 1) & 0x3F) == 33:
+                    w, h = _hevc_sps_size(_nal_unescape(raw))
+                    if w > 0 and h > 0:
+                        return want, w, h
+                elif want == "MPEG-2" and first == 0xB3:
+                    w, h = _mpeg2_seq_size(raw)
+                    if w > 0 and h > 0:
+                        return want, w, h
+            except Exception:
+                continue
+    return _VIDEO_STREAM_TYPES.get(stream_type, ""), 0, 0
+
+
 def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
     """一次连接同时判断：能不能连、是不是真流、能不能拉出画面、真实码率、分辨率。
 
@@ -951,6 +1359,8 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         res_h = 0
         seg_dur = 0.0
         seg_len = 0
+        mediatxt = ""          # 媒体清单原文（换下一片再试、找 EXT-X-MAP 初始化段都要用）
+        base_url = url
         if ".m3u8" in url.lower() or "mpegurl" in ctype:
             text = read_text(resp)
             low = text[:2048].lower()
@@ -972,10 +1382,12 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
                     return False, ttfb, "假源(跳转到占位视频)", 0.0, res_h, 0.0
                 vtext = read_text(vresp)
                 media_text = vtext
-                target, seg_dur = first_segment(vtext, vresp.geturl() or vurl)
+                mediatxt, base_url = vtext, (vresp.geturl() or vurl)
+                target, seg_dur = first_segment(vtext, base_url)
             else:
                 media_text = text
-                target, seg_dur = first_segment(text, resp.geturl() or url)
+                mediatxt, base_url = text, (resp.geturl() or url)
+                target, seg_dur = first_segment(text, base_url)
             # 真直播的清单永远不会有 EXT-X-ENDLIST；带这个标记又很短的，基本都是
             # 广告占位/循环录播(换了台标也放同一条片子)，直接判掉
             if "#EXT-X-ENDLIST" in (media_text or "").upper():
@@ -994,20 +1406,74 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         total = 0
         head = b""
         t_read = 0.0
-        while total < max_bytes and (t_read <= 0 or time.monotonic() - t_read < budget):
+        first_len = 0
+        reached_eof = False
+        buf = bytearray()      # 留一段原始分片，用来解析真实分辨率/编码
+        got_wh = (0, 0)        # 已解析出的 (宽, 高)，解析出来就不再往 buf 里堆
+        got_codec = ""
+        # 分片里找不到 SPS 的(低码率 4K、IDR 稀疏、被切片的首段)就多读一点再试，
+        # 但一旦解析出来立刻停止堆积，正常分片 400KB 就够，内存不会失控。
+        RES_STAGES = (400000, 900000, 2000000)
+        stage = 0
+        # 测速窗口至少 0.8 秒：命中"同服务器已知速度"时原来只有 0.35 秒，
+        # 这段时间还夹着慢启动，测出来的吞吐比真实值低一大截(实测 8M 的台只剩 1M)。
+        win = max(budget, 0.8)
+        while total < max_bytes and (t_read <= 0 or time.monotonic() - t_read < win):
             try:
                 b = resp.read(65536)
             except Exception:
                 break
             if not b:
+                reached_eof = True
                 break
+            if not got_wh[1] and len(buf) < RES_STAGES[-1]:
+                buf += b[:RES_STAGES[-1] - len(buf)]
             if t_read <= 0:
                 # 第一块只用来认内容(TLS 握手与慢启动都算在这块里)，不计入测速窗口
                 head = b[:1024]
+                first_len = len(b)
                 t_read = time.monotonic()
                 continue
             total += len(b)
+            if not got_wh[1] and len(buf) >= RES_STAGES[stage]:
+                stage = min(stage + 1, len(RES_STAGES) - 1)
+                if buf[:4] == b"\x00\x00\x00" or b"ftyp" in buf[:64] or b"styp" in buf[:64]:
+                    _c, _w, _h = parse_mp4_video(bytes(buf))
+                else:
+                    _c, _w, _h = parse_ts_video(bytes(buf))
+                if _c and not got_codec:
+                    got_codec = _c
+                if _h > 0:
+                    got_wh = (_w, _h)
+                    buf = bytearray()          # 已经拿到了，省内存
         dt = (time.monotonic() - t_read) if t_read > 0 else 0.0
+        # 分辨率补读：命中"同服务器已知速度"时测速窗口只有 0.35 秒，10M 的台才 400KB，
+        # SPS 还没轮到就收摊了。这里再补读一小段专门找 SPS(最多 1.2 秒 / 1.6MB)，
+        # 补读的字节不计入 total，不影响 speed 与码率口径。
+        if not got_wh[1] and not reached_eof:
+            t_fix = time.monotonic()
+            next_try = len(buf) + 300000
+            while time.monotonic() - t_fix < 1.2 and len(buf) < 1600000:
+                try:
+                    b = resp.read(65536)
+                except Exception:
+                    break
+                if not b:
+                    break
+                buf += b
+                if len(buf) < next_try:
+                    continue
+                next_try = len(buf) + 300000
+                if buf[:4] == b"\x00\x00\x00" or b"ftyp" in buf[:64] or b"styp" in buf[:64]:
+                    _c, _w, _h = parse_mp4_video(bytes(buf))
+                else:
+                    _c, _w, _h = parse_ts_video(bytes(buf))
+                if _c and not got_codec:
+                    got_codec = _c
+                if _h > 0:
+                    got_wh = (_w, _h)
+                    buf = bytearray()
+                    break
         try:
             resp.close()
         except Exception:
@@ -1020,11 +1486,56 @@ def probe_stream(e, timeout, budget=1.5, max_bytes=2621440):  # noqa: C901
         # 0.25 秒下限：更短的突发只是服务器缓冲，不能当真实带宽
         speed = round(min(300.0, (total * 8 / 1e6) / max(dt, 0.25)), 2)
         # 真实码率 = 分片字节 / 分片时长，和播放器里显示的一致(实测凤凰资讯 6.22、
-        # CCTV2 4.29，与用户手工测的 6.2/4.4 对得上)。拿不到 Content-Length 就留 0，
-        # 界面显示"可用"，不编数字。
+        # CCTV2 4.29，与用户手工测的 6.2/4.4 对得上)。
         mbps = 0.0
         if seg_len > 0 and seg_dur > 0:
             mbps = round(min(300.0, seg_len * 8 / 1e6 / seg_dur), 2)
+        elif seg_dur > 0 and seg_len == 0 and reached_eof and "mpegurl" not in ctype:
+            # 分片没有 Content-Length(分块传输)：整片已经读完，用实际读到的字节数反推码率。
+            # 只认媒体分片，别把嵌套清单(.m3u8)的纯文本当成一个分片。
+            got = first_len + total
+            if got > 0:
+                mbps = round(min(300.0, got * 8 / 1e6 / seg_dur), 2)
+        # 真实分辨率：能有主清单 RESOLUTION 就用，没有就从码流里读 SPS。
+        # 标称分辨率不可信(实测 "cctv8k" 的源其实是 1080p)，所以只认码流里读出来的。
+        codec, _w, _h = got_codec or "", got_wh[0], got_wh[1]
+        if not _h:
+            codec, _w, _h = parse_ts_video(bytes(buf)) if buf[:4] == b"\x47" else parse_mp4_video(bytes(buf))
+        if not _h and mediatxt:
+            # ① fMP4/CMAF：分片里没有 moov，尺寸在 EXT-X-MAP 的初始化段里
+            m = re.search(r'#EXT-X-MAP:.*?URI="([^"]+)"', mediatxt)
+            if m:
+                try:
+                    iu = urljoin(base_url, m.group(1))
+                    with _open(iu, timeout) as ir:
+                        init = ir.read(400000)
+                    c2, w2, h2 = parse_mp4_video(init)
+                    if h2 > 0:
+                        codec, _w, _h = (codec or c2), w2, h2
+                except Exception:
+                    pass
+            # ② TS 里这一片恰好没有 SPS(IDR 稀疏/首片被切)：换清单里下一片再试一次
+            if not _h:
+                for nxt, _d in _more_segments(mediatxt, base_url, 2):
+                    try:
+                        with _open(nxt, timeout) as nr:
+                            nb = nr.read(1200000)
+                        c3, w3, h3 = (parse_mp4_video(nb)
+                                      if (nb[:4] == b"\x00\x00\x00" or b"ftyp" in nb[:64])
+                                      else parse_ts_video(nb))
+                        if h3 > 0:
+                            codec, _w, _h = (codec or c3), w3, h3
+                            break
+                        if c3 and not codec:
+                            codec = c3
+                    except Exception:
+                        continue
+        if codec:
+            e["codec"] = codec
+        if not res_h and _h > 0:
+            res_h = _h
+        if _w and _h:
+            e["res_wh"] = (_w, _h)
         return True, ttfb, "", mbps, res_h, speed
     except Exception:
         return False, 0, "不可达", 0.0, 0, 0.0
@@ -1073,17 +1584,6 @@ def probe_speed(e, timeout):
         return False, 0.0, 0
 
 
-def score_src(s):
-    """排序分：越小越优(仅用于展示排序，不影响 M3U 导出的最佳源判定)"""
-    sc = s.get("ttfb") or 9999
-    mbps = s.get("mbps") or 0
-    if mbps < 3:
-        sc += 800
-    if mbps < 1:
-        sc += 2000
-    return sc
-
-
 # 位置基准：频道所属区域优先匹配的源标签(用于「区域是否对口」判定)
 REGION_TAG = {
     "香港": {"kelvin", "org_hk", "epg_hk"},
@@ -1093,28 +1593,216 @@ REGION_TAG = {
 }
 
 
+# 画质判据（按用户 2026-10-20 三次实测结论定，别再自己发明）：
+#   ①「码率越高图像质量越好」—— 标着 1080P 却只有 1.4 Mbps 的源满街都是，标称不可信；
+#   ②「分辨率和码率都要看」—— 码率高但分辨率低、或分辨率高但码率低，画面都不行；
+#   ③ 用户给的门槛原话：「分辨率 1080P 以上，码率 2M 以上，图像质量就很清晰」；
+#   ④ 流畅度另算：「网络(下载吞吐) 400KB/s 以上，看着不卡顿」(400KB/s ≈ 3.2 Mbps)。
+# 所以：清晰 = 实测分辨率 ≥1080P 且 实测码率 ≥2 Mbps；流畅 = 实测吞吐 ≥400KB/s。
+CLARITY_HEIGHT = 1000          # ≥1000 像素算高清分辨率(1080P 及以上)
+CLARITY_MBPS = 2.0             # 用户给的码率门槛：2 Mbps
+SMOOTH_KBPS = 400.0            # 用户给的流畅门槛：400 KB/s(≈3.2 Mbps)
+MB_TIERS = ((9.0, 4, "超清"), (5.0, 3, "高清"), (2.5, 2, "标准"), (1.0, 1, "一般"))
+RES_LEVELS = ((2000, 4.0, "4K"), (1000, 3.0, "1080P"), (620, 2.0, "720P"), (400, 1.0, "480P"))
+# 央视频道的官方说法（台标上印的那几个字），频道名统一按这个写
+CCTV_OFFICIAL = {
+    "1": "综合", "2": "财经", "3": "综艺", "4": "中文国际", "5": "体育",
+    "5+": "体育赛事", "6": "电影", "7": "国防军事", "8": "电视剧", "9": "纪录",
+    "10": "科教", "11": "戏曲", "12": "社会与法", "13": "新闻", "14": "少儿",
+    "15": "音乐", "16": "奥林匹克", "17": "农业农村", "4k": "超高清", "8k": "超高清",
+}
+
+
+def mbps_tier(mbps):
+    """按实测码率分档，返回 (等级 0-4, 名称)；0 且名称为空 = 没测到码率。
+    4=超清(≥9M) 3=高清(≥5M) 2=标准(≥2.5M) 1=一般(≥1M) 0(<1M 或未知)"""
+    try:
+        m = float(mbps or 0)
+    except Exception:
+        m = 0.0
+    if m <= 0:
+        return 0, ""
+    for cut, lv, nm in MB_TIERS:
+        if m >= cut:
+            return lv, nm
+    return 0, "低码率"
+
+
+def mbps_level(mbps):
+    """码率等级(数值 0.3~4)：没测到返回 None。"""
+    lv, nm = mbps_tier(mbps)
+    if not nm:
+        return None
+    return float(lv) if lv > 0 else 0.3
+
+
+def res_level(res_h):
+    """分辨率等级(数值 0.3~4)：没测到返回 None。"""
+    try:
+        rh = int(res_h or 0)
+    except Exception:
+        rh = 0
+    if rh <= 0:
+        return None
+    for cut, lv, _nm in RES_LEVELS:
+        if rh >= cut:
+            return lv
+    return 0.3
+
+
+def res_label(res_h):
+    """分辨率档的显示名(4K/1080P/720P/480P/低分辨率)，没测到返回空串。"""
+    lv = res_level(res_h)
+    if lv is None:
+        return ""
+    for cut, clv, nm in RES_LEVELS:
+        if lv == clv:
+            return nm
+    return "低分辨率"
+
+
+def official_cctv_name(name):
+    """央视频道统一成"台标上的官方名字"（CCTV-1 综合 / CCTV-2 财经 / CCTV-9 纪录 /
+    CCTV-5+ 体育赛事 / CCTV-4K 超高清），用户照着台标就能对上号。
+    不是央视(或对不上号)返回空串，调用方保持原样。"""
+    n = (name or "").strip()
+    m = re.match(r"^cctv[\-\s]?(\d{1,2})(\+)?(.*)$", n, re.I)
+    if not m:
+        return ""
+    num = m.group(1)
+    plus = "+" if m.group(2) else ""
+    tail = (m.group(3) or "").strip().lower()
+    key = num + plus
+    if ("4k" in tail or "8k" in tail or tail.startswith("k")) and num in ("4", "8"):
+        key = num + "k"                      # cctv-4k超高清 / CCTV8K
+    suffix = CCTV_OFFICIAL.get(key)
+    if not suffix:
+        return ""
+    region = ""
+    for kw, cn in (("asia", "亚洲"), ("europe", "欧洲"), ("america", "美洲")):
+        if kw in tail:
+            region = "（%s）" % cn
+            break
+    head = "CCTV-%s%s" % (num, plus)
+    if key in ("4k", "8k"):
+        head = "CCTV-%sK" % num
+    return head + " " + suffix + region
+
+
+# 非央视频道的展示名修正(2026-10-20 用户要求"名字统一")：精确匹配才替换，
+# 替换后原名存 aka，搜索仍能命中旧写法。
+NAME_FIXES = {
+    "内蒙少儿": "内蒙古少儿",          # 图库/官方都叫"内蒙古少儿"
+    "TVBPearl": "TVB Pearl",         # 连写不易读，加空格
+    "凤凰香港台": "香港台",           # 台标写"香港台"，频道名跟着台标走
+}
+
+# 台标图库别名：这些频道在图库里的文件名跟频道名对不上(差个"频道"后缀/写法不同)，
+# 自动解析会 miss，这里点名直查。值为 (库, 图库内路径)。
+LOGO_ALIASES = {
+    "CCTV-4 欧洲": ("cachemiao", "tv/CCTV4欧洲.png"),
+    "CCTV4 Europe": ("cachemiao", "tv/CCTV4欧洲.png"),   # 兼容旧缓存名
+    "CCTV-4 中文国际（欧洲）": ("cachemiao", "tv/CCTV4欧洲.png"),
+    "CCTV-4 中文国际（美洲）": ("cachemiao", "tv/CCTV4美洲.png"),
+    "内蒙古少儿": ("cachemiao", "tv/内蒙古少儿频道.png"),
+    "浙江教科影视": ("cachemiao", "tv/浙江科教影视.png"),
+    # 图库文件名跟频道名对不上，逐个点名
+    "凤凰中文台": ("cachemiao", "tv/凤凰卫视中文台.png"),
+    "凤凰资讯台": ("cachemiao", "tv/凤凰卫视资讯台.png"),
+    "凤凰香港": ("wanglindl", "img/Phoenix3.png"),
+    "香港台": ("wanglindl", "img/Phoenix3.png"),
+    "优漫卡通": ("cachemiao", "tv/江苏优漫卡通.png"),
+    "黑龙江卫视": ("cachemiao", "tv/黑龙江卫视.png"),
+    "大湾区卫视": ("cachemiao", "tv/广东大湾区卫视.png"),
+    "金鹰纪实": ("cachemiao", "tv/湖南金鹰纪实.png"),
+    # cachemiao 里也有一张"翡翠台"，但是 180x187 的近方图，跟列表里其他横版台标不统一。
+    # 这里点名锁 CCSH 那张 300x180 横版的，避免图库扩容后被近方图顶掉。
+    "翡翠台": ("other", "翡翠台.png"),
+    "翡翠台 HD": ("other", "翡翠台.png"),
+    # 电影台锁用户提供的那张(已去白边、透明底、300x180)。不锁的话：
+    # ① 图库扩容后 cachemiao 一旦出现"电影台.png"就会顶掉它；
+    # ② other 那张万一丢了，宽松匹配会误配到"靖天电影台/凤凰卫视电影台"。
+    "电影台": ("other", "电影台.png"),
+    # Channel 13（泰国）：wanglindl 那张是已去白底的透明版(209x135)，
+    # other 库原先用的是带白底的 392x227，白底图被判 white → 界面上灰化成一块灰块。
+    # 这里锁别的库那张透明版，防止以后又被白底图盖回去。
+    "Channel 13": ("other", "Channel 13.png"),
+    # Channel One Europa：四个图库都没有，是自己画的(深蓝底白字 300x180)。
+    # 锁住，免得将来图库更新时被近似的 "Channel One" / "CH1" 之类的图误配顶掉。
+    "Channel One Europa": ("other", "Channel One Europa.png"),
+}
+
+
+def quality_label(mbps, res_h):
+    """一句话画质结论(界面上的角标)：严格按用户的门槛判，不猜。"""
+    try:
+        rh = int(res_h or 0)
+    except Exception:
+        rh = 0
+    try:
+        mb = float(mbps or 0)
+    except Exception:
+        mb = 0.0
+    if rh >= 1800 and mb >= CLARITY_MBPS:
+        return "4K超清"
+    if rh >= CLARITY_HEIGHT and mb >= CLARITY_MBPS:
+        return "高清"
+    if rh >= CLARITY_HEIGHT and mb > 0:
+        return "低码率"
+    if 620 <= rh < CLARITY_HEIGHT:
+        return "720P"
+    if 0 < rh < 620:
+        return "低分辨率"
+    if rh == 0 and mb >= CLARITY_MBPS:
+        return "未测分辨率"
+    return "未测"
+
+
+def clear_enough(mbps, res_h):
+    """是否达到用户说的"清晰"：分辨率 ≥1080P 且 码率 ≥2 Mbps。"""
+    try:
+        rh = int(res_h or 0)
+    except Exception:
+        rh = 0
+    try:
+        mb = float(mbps or 0)
+    except Exception:
+        mb = 0.0
+    return rh >= CLARITY_HEIGHT and mb >= CLARITY_MBPS
+
+
 def _src_quality(s, ch):
-    """推断该源的画质等级 1-4：优先流内实测分辨率，其次 URL/频道名 (4=4K+, 3=1080P, 2=720P, 1=标清/未知)"""
-    res_h = s.get("res") or 0
-    if res_h >= 2000:
-        return 4
-    if res_h >= 1000:
-        return 3
-    if res_h >= 620:
-        return 2
+    """综合画质分(越高越好)：分辨率定档，码率决定这一档能拿到多少。
+    - 分辨率档(4:≥4K 3:1080P 2:720P 1:480P) × 码率达标度(≥2M 满分) 为主项；
+    - 再加一点码率余量分(最多 +5)，让同为 1080P 时高码率的排前面；
+    - 没测到分辨率时按 720P 记(不虚高也不打死)，并留旧逻辑对"确实没数据"的少量源兜底。"""
+    try:
+        mb = float(s.get("mbps") or 0)
+    except Exception:
+        mb = 0.0
+    rh = s.get("res") or 0
+    rs = res_level(rh)
+    if mb > 0:
+        adequate = min(1.0, mb / CLARITY_MBPS)
+        bonus = min(1.0, mb / 10.0) * 5.0
+        base = rs if rs is not None else 2.0
+        return round(base * 10 * (0.55 + 0.45 * adequate) + bonus, 2)
+    # 一个数字都没测到(极少数)：只按标称做排序兜底，不当画质结论
+    if rs is not None:
+        return round(rs * 10 * 0.35, 2)
     u = (s.get("url") or "").lower()
     if re.search(r"4k|2160|uhd|8k", u):
-        return 4
+        return 3.0
     if re.search(r"1080|1920|fhd|超高清|蓝光", u):
-        return 3
+        return 2.0
     if re.search(r"720|\bhd\b|高清", u):
-        return 2
+        return 1.5
     q = ch.get("quality")
     if q == "1080P":
-        return 3
+        return 1.2
     if q == "HD":
-        return 2
-    return 1
+        return 0.8
+    return 0.5
 
 
 # 上一轮每个频道在用的最佳地址；本轮只要它还活着就继续用，
@@ -1123,22 +1811,23 @@ PREV_BEST = set()
 
 
 def pick_best_source(ch):
-    """程序权威筛选：在已验证可用的源中，按「图像质量 > 位置基准 > 链接速度」选出唯一最佳源。
-    返回被选中的源(dict)；无可用源返回 None。该最佳源即为写入 M3U 的唯一地址(不列备选)。"""
+    """程序权威筛选：在已验证可用的源中，按「画质(实测分辨率+码率双维度) > 人工精选 > 沿用上一轮 >
+    位置基准 > 链接速度」选出唯一最佳源。返回被选中的源(dict)；无可用源返回 None。
+    该最佳源即为写入 M3U 的唯一地址(不列备选)。"""
     live = [s for s in ch["sources"] if s.get("live") and s.get("url")]
     if not live:
         return None
     region = REGION_TAG.get(ch["group"], set())
 
     def score(s):
-        cur = 1 if s.get("tag") == "curated" else 0   # 人工核对过的源，优先用
-        keep = 1 if s.get("url") in PREV_BEST else 0  # 上一轮就在用且现在仍然可用：别换来换去
-        q = _src_quality(s, ch)                       # 图像质量(越高越好)
+        q = _src_quality(s, ch)                       # 画面质量：实测分辨率与码率的短板决定上限
+        cur = 1 if s.get("tag") == "curated" else 0   # 人工核对过的源，同档时优先用
+        keep = 1 if s.get("url") in PREV_BEST else 0  # 上一轮就在用且现在仍然可用：同档时别换来换去
         loc = 1 if s["tag"] in region else 0          # 位置基准：源的区域标签是否对口
         ttfb = s.get("ttfb") or 9999                  # 链接速度：首包延迟(越低越好)
         mbps = s.get("mbps") or 0                     # 码率
         spd = max(0.0, (2000 - ttfb) / 500.0) + min(mbps, 40) * 0.5
-        return (cur, keep, q, loc, spd)
+        return (q, cur, keep, loc, spd)
     return max(live, key=score)
 
 
@@ -1146,6 +1835,9 @@ def pick_best_source(ch):
 
 # 图标库模板({name} 为 URL 编码后的中文台名)；均为 2026-10 实测用户网络可达
 LOGO_TPLS = [
+    # 用户 2026-10-20 给的台标站：4 万枚图，按频道名直取，支持别名匹配，比下面几个 GitHub
+    # 图库全得多(央视、卫视、地方台、港澳台都有)，放第一位，取不到再退回下面几个
+    "https://v.999.team/logo.php?name={name}",
     # 同样的图站在国内快一些(jsDelivr)，raw 兜底
     "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/{name}.png",
     "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/{name}.png",
@@ -1153,7 +1845,26 @@ LOGO_TPLS = [
     "https://raw.githubusercontent.com/fanmingming/live/main/tv/{name}.png",
 ]
 LOGO_TTL = 7 * 86400          # 台标实测结果缓存 7 天
+
+# ---- 台标来源白名单(2026-10-20 用户要求：所有台标来源必须统一) ----
+# 只允许这两个 GitHub 图库。混用别的图库时同一批频道会出现"白底/彩底/黑底"
+# 三种风格混在一起，列表里看着很乱；央视那几个台尤其明显(CCTV2 之前就是
+# 从 CCSH 拿的图，跟旁边的 cachemiao 完全不是一套)。
+# 因此这里做一道硬闸：不管台标是从哪条路进来的(抓源自带的 tvg-logo、自动解析、
+# 读缓存)，只要不是这两个库，一律丢弃留空——宁可没图标，也不要风格打架。
+LOGO_OK_HOSTS = ("cachemiao/m3u-logos", "wanglindl/TVlogo",
+                 # 两个主库都没有的冷门台(黄金翡翠/电影台这类)，从别的中文图库单独补的几张，
+                 # 同样随包发行 logos_lib/other/，取图还是走本机
+                 "CCSH/IPTV@main/logo", "fanmingming/live@main/tv")
+
+def _filter_logo(u):
+    """台标来源闸口：白名单内的原样返回，其它一律清空返回 ""。"""
+    u = (u or "").strip()
+    if not u:
+        return ""
+    return u if any(h in u for h in LOGO_OK_HOSTS) else ""
 _LOGO_CACHE = {}              # url -> [unix_ts, ok]
+_LOGO_KIND = {}               # url -> white/dark/color（台标配色，决定要不要垫深色底）
 _LOGO_BYTES = {}              # url -> (content_type, bytes)  台标本地中转缓存(最多 600 张)
 _LOGO_BYTES_MAX = 600
 LOGO_DIR = BASE / "logos"      # 台标图片本地留档：程序重启后 /logo 也不用再出网
@@ -1175,11 +1886,210 @@ def _save_logo_cache():
     except OSError:
         pass
 
+def _png_pixels(data):
+    """极简 PNG 解码：只认 8 位的灰/RGB/调色板/RGBA(台标库实际就这几种)，
+    产出 (宽, 高, [(r,g,b,a), ...] 采样后的像素)。解不动返回 None。
+    用来判断台标是不是"透明底白图"——那种图放在浅色界面上等于看不见。"""
+    import zlib
+    if not data.startswith(b"\x89PNG"):
+        return None
+    i = 8
+    w = h = bitd = ctype = inter = 0
+    idat = bytearray()
+    plte = b""
+    trns = b""
+    while i + 8 <= len(data):
+        ln = int.from_bytes(data[i:i + 4], "big")
+        typ = data[i + 4:i + 8]
+        body = data[i + 8:i + 8 + ln]
+        if typ == b"IHDR":
+            w, h = int.from_bytes(body[0:4], "big"), int.from_bytes(body[4:8], "big")
+            bitd, ctype = body[8], body[9]
+            inter = body[12]
+        elif typ == b"PLTE":
+            plte = body
+        elif typ == b"tRNS":
+            trns = body              # 调色板透明表：央视那批"白字透明底"就靠它
+        elif typ == b"IDAT":
+            idat += body
+        elif typ == b"IEND":
+            break
+        i += 12 + ln
+    if not w or not h or inter != 0:
+        return None
+    if ctype == 3:
+        if bitd not in (1, 2, 4, 8):
+            return None
+        ch = 1
+        stride = (w * bitd + 7) // 8
+    elif ctype in (0, 2, 4, 6) and bitd in (8, 16):
+        ch = {0: 1, 2: 3, 4: 2, 6: 4}[ctype]
+        stride = w * ch * (2 if bitd == 16 else 1)
+    else:
+        return None
+    try:
+        raw = zlib.decompress(bytes(idat))
+    except Exception:
+        return None
+    bs = 2 if bitd == 16 else 1          # 16 位图只取高字节
+    bpp = max(1, ch * bs)                # PNG 滤波按字节/像素算
+    prev = bytearray(stride)
+    out = []
+    step = max(1, w // 32)
+    p = 0
+    for y in range(h):
+        if p >= len(raw):
+            break
+        f = raw[p]
+        p += 1
+        line = bytearray(raw[p:p + stride])
+        if len(line) < stride:
+            break
+        p += stride
+        if f == 1:
+            for x in range(bpp, stride):
+                line[x] = (line[x] + line[x - bpp]) & 0xFF
+        elif f == 2:
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 0xFF
+        elif f == 3:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xFF
+        elif f == 4:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                b2 = prev[x]
+                c = prev[x - bpp] if x >= bpp else 0
+                pp = a + b2 - c
+                pa, pb, pc = abs(pp - a), abs(pp - b2), abs(pp - c)
+                pr = a if (pa <= pb and pa <= pc) else (b2 if pb <= pc else c)
+                line[x] = (line[x] + pr) & 0xFF
+        for x in range(0, w, step):
+            o = x * ch * bs if ctype != 3 else 0
+            if ctype == 0:
+                g = line[x * bs]
+                px = (g, g, g, 255)
+            elif ctype == 4:
+                g, a = line[x * 2 * bs], line[x * 2 * bs + bs]
+                px = (g, g, g, a)
+            elif ctype == 2:
+                px = (line[x * 3 * bs], line[x * 3 * bs + bs], line[x * 3 * bs + 2 * bs], 255)
+            elif ctype == 6:
+                px = (line[x * 4 * bs], line[x * 4 * bs + bs],
+                      line[x * 4 * bs + 2 * bs], line[x * 4 * bs + 3 * bs])
+            else:                                    # 调色板 ctype=3
+                if bitd == 8:
+                    idx = line[x]
+                else:
+                    bitpos = x * bitd
+                    idx = (line[bitpos >> 3] >> (8 - bitd - (bitpos & 7))) & ((1 << bitd) - 1)
+                a = trns[idx] if idx < len(trns) else 255
+                o2 = idx * 3
+                if o2 + 2 < len(plte):
+                    px = (plte[o2], plte[o2 + 1], plte[o2 + 2], a)
+                else:
+                    px = (0, 0, 0, 0)
+            out.append(px)
+        prev = line
+    return w, h, out
+
+
+# 台标配色强制覆盖：自动检测容易误判的少数台标，按 URL 关键字强制指定
+_LOGO_KIND_OVERRIDE = {
+    "Phoenix3.png": "color",             # 凤凰香港台：橙色凤凰+白字
+    "%E9%BB%84%E9%87%91%E7%BF%A1%E7%BF%A0": "color",  # 黄金翡翠：myTV SUPER 白字台标
+    "%E4%BA%9A%E6%B4%B2%E5%89%A7": "color",           # 亚洲剧：Asia Digital Media 彩标
+}
+
+# 频道名强制覆盖：上游数据源的频道名跟台标/实际称呼不一致时，在此统一
+_CHANNEL_NAME_OVERRIDE = {
+    "凤凰香港台": "香港台",
+}
+
+# 台标 URL 强制覆盖：M3U 源自带的 tvg-logo 指向的台标不对时，在此强制指定正确的台标 URL
+# 键是频道 key（如"凤凰香港"），值是完整的台标 URL
+_LOGO_URL_OVERRIDE = {
+    "凤凰香港": "https://raw.githubusercontent.com/wanglindl/TVlogo/master/img/Phoenix3.png",
+    "香港台": "https://raw.githubusercontent.com/wanglindl/TVlogo/master/img/Phoenix3.png",
+}
+
+def logo_kind(data, url=""):
+    """台标配色归类：white=透明底白图(浅色界面上看不见，得垫深色)、
+    dark=深色图形、color=彩图、""=判不出来(PNG 解不动/JPEG 等)。"""
+    if url:
+        for _kw, _v in _LOGO_KIND_OVERRIDE.items():
+            if _kw in url:
+                return _v
+    got = _png_pixels(data)
+    if not got:
+        return ""
+    _w, _h, px = got
+    tot = white = dark = colored = 0
+    for r, g, b, a in px:
+        if a < 64:
+            continue
+        tot += 1
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        if lum >= 205:
+            white += 1
+        elif lum <= 70:
+            dark += 1
+        # 明显彩色：通道差大(非灰阶)。官方台标常见"白底/白字+彩色图形"(翡翠台、山西卫视)，
+        # 只看亮度会把它们整张判成 white 然后被前端灰化，彩色就没了——
+        # 所以只要有足量彩色像素，一律按彩图对待
+        if max(r, g, b) - min(r, g, b) >= 45:
+            colored += 1
+    if not tot:
+        return "white"          # 全透明：按白图处理
+    # 阈值取 8%：纯白单色标(CCTV)彩色是 0 不误判；"白字+少量彩色点缀"的标
+    # (如亚洲剧 NYJTV 白字+小彩条 colored 5.8%)按白图处理垫深色底，浅色界面才看得清；
+    # 而彩色确是主体的官方标(翡翠台三色球 21.7%、山西卫视 17.6%)都在 8% 以上，保留彩色
+    if colored / tot >= 0.08:
+        return "color"
+    if white / tot >= 0.45:
+        return "white"
+    if dark / tot >= 0.45:
+        return "dark"
+    return "color"
+
+
+def _enc_url(u):
+    """把 URL 里的非 ASCII 字符(中文台名等)做百分号编码后才能真正发出请求。
+
+    urllib 碰到路径里带中文会直接 UnicodeEncodeError('ascii', ...)，请求根本发不出去，
+    表现就是"这一批台标一个都加载不出来"。已编码的 %XX 保持不变，避免二次编码成 %25XX。
+    """
+    try:
+        u.encode("ascii")
+        return u                      # 纯 ASCII，原样返回
+    except (UnicodeEncodeError, AttributeError):
+        pass
+    return quote(u, safe=":/?#[]@!$&'()*+,;=%~-._")
+
+
 def _check_logo(url, timeout=2):
     """HTTP 200 且响应头几个字节为 PNG/JPEG 魔数才认定为可用台标(防 JSON/HTML 冒充)。
-    顺手把图片字节留在内存里，页面走 /logo 直接用，不用第二次出网。"""
+    顺手把图片字节留在内存里，页面走 /logo 直接用，不用第二次出网。
+    白名单两库的 URL 先查离线整库：本地有图直接判定可用，不出网(国内拉 GitHub 基本超时)。"""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=UA),
+        p0 = _logo_lib_path_for_url(url)
+        if p0 is not None and p0.exists() and p0.stat().st_size > 200:
+            body = p0.read_bytes()
+            if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
+                _LOGO_BYTES.clear()
+            _LOGO_BYTES[url] = ("image/png", body)
+            try:
+                _LOGO_KIND[url] = logo_kind(body, url)
+            except Exception:
+                pass
+            try:
+                LOGO_DIR.mkdir(parents=True, exist_ok=True)
+                (LOGO_DIR / _logo_file(url)).write_bytes(body)
+            except OSError:
+                pass
+            return True
+        with urllib.request.urlopen(urllib.request.Request(_enc_url(url), headers=UA),
                                     timeout=timeout, context=_SSL_CTX) as r:
             ctype = r.headers.get("Content-Type") or "image/png"
             body = r.read(400 * 1024)
@@ -1189,6 +2099,10 @@ def _check_logo(url, timeout=2):
         if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
             _LOGO_BYTES.clear()
         _LOGO_BYTES[url] = (ctype, body)
+        try:
+            _LOGO_KIND[url] = logo_kind(body, url)
+        except Exception:
+            pass
         try:
             LOGO_DIR.mkdir(parents=True, exist_ok=True)
             (LOGO_DIR / _logo_file(url)).write_bytes(body)
@@ -1204,10 +2118,15 @@ def _logo_file(url):
 
 
 def _logo_from_disk(url):
-    """磁盘缓存里直接读（有就直接用，不用管图标站现在还能不能访问）"""
-    try:
-        p = LOGO_DIR / _logo_file(url)
-        if p.exists():
+    """磁盘缓存里直接读（有就直接用，不用管图标站现在还能不能访问）。
+    白名单两库的 URL 还可以退到离线整库 logos_lib/ 里按原始路径找——
+    也就是台标展示永远有本机兜底，GitHub 抽风也不影响画面。"""
+    for p in (LOGO_DIR / _logo_file(url), _logo_lib_path_for_url(url)):
+        if p is None:
+            continue
+        try:
+            if not (p.exists() and p.stat().st_size > 200):
+                continue
             body = p.read_bytes()
             if body.startswith(b"\x89PNG"):
                 return ("image/png", body)
@@ -1217,50 +2136,258 @@ def _logo_from_disk(url):
                 return ("image/gif", body)
             if body[:4] == b"RIFF":
                 return ("image/webp", body)
-    except OSError:
+        except OSError:
+            continue
+    return None
+
+
+def _logo_lib_path_for_url(url):
+    """从白名单 URL 解析出离线整库里的文件路径；不是两库的 URL 返回 None。"""
+    from urllib.parse import unquote as _uq   # 提到最外层：URL 不匹配任何 host 时
+    try:                                      # 下面 other 兜底还要用它，放循环里会 NameError
+        u = (url or "").split("#")[0]
+        for host in ("cachemiao/m3u-logos", "wanglindl/TVlogo", "fanmingming/live"):
+            i = u.find(host)
+            if i < 0:
+                continue
+            rest = u[i + len(host):].lstrip("/")          # main/tv/xxx.png 或 img/xxx.png
+            rest = re.sub(r"^[^/]+/", "", rest, count=1)  # 去掉 branch 段(main/master/@main)
+            rel = _uq(rest)
+            if rel.lower().endswith(".png") and "/" in rel:
+                return _lib_root() / host.split("/")[0] / rel.replace("/", os.sep)
+    except Exception:
+        pass
+    # 补充图库(other)：文件名就是频道名，本地有这张图就算这台有了
+    try:
+        bn = _uq(url.rstrip("/").rsplit("/", 1)[-1])
+        if bn.lower().endswith(".png"):
+            p = _lib_root() / "other" / bn
+            if p.exists() and p.stat().st_size > 200:
+                return p
+    except Exception:
         pass
     return None
 
 
-def resolve_logo(name, src_logo):
-    """台标候选链：源自带(逐条实测) -> CCSH 图标库(中文名) -> fanmingming 图标库(中文名)。
-    任何候选必须实测 200+图片魔数才采用；结果缓存 7 天。返回可用 URL 或空串。"""
-    # 源自带的台标也要验一次：很多聚合源里是死链/防盗链，浏览器里就是一个个灰方块
-    # (缓存在 _LOGO_CACHE，命中不花时间；验证过的坏链会继续往下走图标库补)
-    if src_logo and src_logo.startswith(("https://", "http://")):
-        now0 = time.time()
-        ent0 = _LOGO_CACHE.get(src_logo)
-        if ent0 and now0 - ent0[0] < LOGO_TTL:
-            if ent0[1]:
-                return src_logo
-        else:
-            ok0 = _check_logo(src_logo)
-            _LOGO_CACHE[src_logo] = [now0, ok0]
-            if ok0:
-                return src_logo
-    # 台名变体：带"台/频道"后缀、带 HD、带空格的写法，图标库里常常只收了其中一种
-    names = [name]
-    n2 = re.sub(r"\s*[hH][dD]\s*$", "", name).strip()
-    n3 = re.sub(r"(电视台|频道|台)$", "", name).strip()
-    n4 = name.replace(" ", "")
+_LOGO_VER_CACHE = {}
+
+
+def _logo_version(url):
+    """台标内容指纹(8位md5)。把它作为版本号拼进 /logo 的 URL：图一变指纹就变，
+    浏览器按 URL 缓存，必然重新拉取，根治『改了图却因长缓存(7天)显示旧图』。"""
+    import hashlib
+    v = _LOGO_VER_CACHE.get(url)
+    if v:
+        return v
+    try:
+        p = _logo_lib_path_for_url(url)
+        if p is not None and p.exists() and p.stat().st_size > 200:
+            v = hashlib.md5(p.read_bytes()).hexdigest()[:8]
+    except Exception:
+        v = None
+    if not v:
+        try:
+            data = _LOGO_BYTES.get(url) or _logo_from_disk(url)
+            if data:
+                v = hashlib.md5(data[1]).hexdigest()[:8]
+        except Exception:
+            v = None
+    if not v:
+        v = hashlib.md5(url.encode("utf-8")).hexdigest()[:8]
+    _LOGO_VER_CACHE[url] = v
+    return v
+
+
+def _lib_root():
+    """离线台标库根目录。打包后优先读 exe 内置的那份(sys._MEIPASS)，
+    其次才是数据目录下的 logos_lib(用户自己补的图也算)。"""
+    root = None
+    try:
+        import sys
+        if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+            root = Path(sys._MEIPASS) / "logos_lib"
+    except Exception:
+        pass
+    base = LOGO_DIR.parent / "logos_lib"
+    return root if (root and root.is_dir()) else base
+
+
+def _lib_file(rel_lib, rel_path):
+    """本地图库文件全路径。整库已随包发行(pyinstaller 解压到 sys._MEIPASS)。"""
+    p = _lib_root() / rel_lib / rel_path
+    return p if p.exists() and p.stat().st_size > 200 else None
+
+
+def _alias_url(al):
+    """别名表条目 -> 对应的白名单 URL。支持 cachemiao / other(CCSH) / wanglindl 三个库。"""
+    lib, rel = al[0], al[1]
+    if lib == "cachemiao":
+        return "https://raw.githubusercontent.com/cachemiao/m3u-logos/main/%s" % rel
+    if lib == "other":
+        return "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/%s" % quote(rel)
+    return "https://raw.githubusercontent.com/wanglindl/TVlogo/main/%s" % rel
+
+
+_LIB_STEMS_CACHE = {}
+
+
+def _lib_stems(rel_lib, sub):
+    """图库子目录里所有 png 的文件名(去掉扩展名)，带缓存，供宽松匹配使用。"""
+    key = (rel_lib, sub)
+    if key in _LIB_STEMS_CACHE:
+        return _LIB_STEMS_CACHE[key]
+    stems = set()
+    try:
+        d = _lib_root() / rel_lib / sub
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.name.lower().endswith(".png"):
+                    stems.add(f.name[:-4])
+    except Exception:
+        pass
+    _LIB_STEMS_CACHE[key] = stems
+    return stems
+
+
+# 太通用的频道名不做宽松匹配，否则"新闻综合"会被配到某个省的新闻综合台
+_FUZZY_BLOCK = {"新闻综合", "综合频道", "新闻", "公共", "生活", "影视", "经济", "科教",
+                "文体", "都市", "娱乐", "电影", "电影台", "电视剧", "少儿", "卡通",
+                "导视", "综合", "电视台", "新闻频道", "卫视"}
+
+
+def _lib_fuzzy(rel_lib, sub, cands, url_tpl):
+    """精确匹配失败后的兜底：图库文件名以频道名开头或结尾，或包含频道名。
+    例如"余姚新闻综合"能命中"浙江余姚新闻综合"。取长度最接近的候选，减少误配。"""
+    stems = _lib_stems(rel_lib, sub)
+    if not stems:
+        return ""
+    cores = set()
+    for v in cands:
+        if not v or v in _FUZZY_BLOCK or len(v) < 3:
+            continue
+        cores.add(v)
+    if not cores:
+        return ""
+    best, best_d = None, 10 ** 9
+    for stem in stems:
+        for core in cores:
+            if not (stem.endswith(core) or stem.startswith(core)
+                    or (len(core) >= 4 and core in stem)):
+                continue
+            d = abs(len(stem) - len(core))
+            if d < best_d:
+                best_d, best = d, stem
+    return url_tpl % quote(best) if best else ""
+
+
+def _resolve_logo_local(name):
+    """在离线图库里按频道名找台标：命中本地文件 = 100% 可用，零出网。
+    返回白名单 URL 或空串。顺序：别名表 -> 原名 -> 常见变体 -> 宽松兜底。"""
+    if not name:
+        return ""
+    lib = "cachemiao"          # 离线图库目录名
+    host = "cachemiao/m3u-logos"
+    n = (name or "").strip()
+    cands = [n]
+    # 央视官方名 -> 图库文件名。台里改名叫"CCTV-1 综合"了，图库里还是 CCTV1.png 这一套
+    mc = re.match(r"^cctv[-\s]?(\d{1,2})\s*(\+)?\s*([k])?\s*(.*)$", n, re.I)
+    if mc:
+        num, plus, k = mc.group(1), mc.group(2) or "", (mc.group(3) or "").upper()
+        cands.append("CCTV%s%s%s" % (num, plus, k))
+        cands.append("CCTV-%s%s%s" % (num, plus, k))
+    # 图库里带前缀/后缀的写法：兵器科技 -> CCTV兵器科技；内蒙古少儿 -> 内蒙古少儿频道
+    for b in list(cands):
+        for suf in ("频道", "台", "卫视"):
+            if not b.endswith(suf):
+                cands.append(b + suf)
+        for pre in ("CCTV",):
+            cands.append(pre + b)
+    n2 = re.sub(r"\s*[hH][dD4kK8kK]*\s*$", "", n).strip()
+    n3 = re.sub(r"(电视台|频道|台)$", "", n).strip()
+    n4 = n.replace(" ", "").replace("-", "")
     for v in (n2, n3, n4):
-        if v and v not in names:
-            names.append(v)
-    cands = []
-    for nm in names:
-        qn = quote(nm)
-        cands += [t.format(name=qn) for t in LOGO_TPLS]
-    now = time.time()
-    for u in cands:
+        if v and v not in cands:
+            cands.append(v)
+    # 别名表也参与变体匹配(原名带 HD/后缀时精确查会 miss，如"凤凰香港 HD"->凤凰香港)
+    for v in cands:
+        al = LOGO_ALIASES.get(v)
+        if al and _lib_file(al[0], al[1]):
+            return _alias_url(al)
+    seen = set()
+    for v in cands:
+        if not v or v in seen:
+            continue
+        seen.add(v)
+        for qn in (v, v.upper(), v.lower()):
+            p = _lib_file(lib, "tv/%s.png" % qn)
+            if p:
+                return "https://raw.githubusercontent.com/%s/main/tv/%s.png" % (host, quote(qn))
+    # 冷门台：别的中文图库单独补的几张，放 logos_lib/other/<频道名>.png
+    for v in [n] + cands[:1]:
+        for qn in (v, n2, n3, n4):
+            if not qn:
+                continue
+            p = _lib_file("other", "%s.png" % qn)
+            if p:
+                return "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/%s.png" % quote(qn)
+    # 另一个图库(英文命名)再试一遍
+    for v in cands:
+        for qn in (v, v.upper(), v.lower()):
+            p = _lib_file("wanglindl", "img/%s.png" % qn)
+            if p:
+                return "https://raw.githubusercontent.com/wanglindl/TVlogo/main/img/%s.png" % quote(qn)
+    # fanmingming/live 图库(933 张)：港澳台和台湾频道(民视/TVBS/中天)最全，
+    # 放最后兜底——前两个库都命中不了的大多是这类台
+    for v in cands:
+        for qn in (v, v.upper(), v.lower()):
+            p = _lib_file("fanmingming", "tv/%s.png" % qn)
+            if p:
+                return "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/%s.png" % quote(qn)
+    # 宽松兜底：图库文件名常带省/市前缀(如"浙江余姚新闻综合")，而频道名只有后半段。
+    # 精确匹配配不上时用前缀/后缀/包含再找一次，能补回几十个地方台台标
+    u = _lib_fuzzy("cachemiao", "tv", cands,
+                   "https://raw.githubusercontent.com/cachemiao/m3u-logos/main/tv/%s.png")
+    if u:
+        return u
+    u = _lib_fuzzy("fanmingming", "tv", cands,
+                   "https://cdn.jsdelivr.net/gh/fanmingming/live@main/tv/%s.png")
+    if u:
+        return u
+    return ""
+
+
+def resolve_logo(name, src_logo):
+    """台标候选链：离线图库(名字直查，零出网) -> 图库别名 -> 源自带的白名单图。
+    全部只出白名单两库，结果必须可验证(本地文件在/网络实测 200)才采用。"""
+    # 图库别名：图库文件名跟频道名对不上的(写法差异)，点名直查
+    al = LOGO_ALIASES.get((name or "").strip())
+    if al:
+        u = _alias_url(al)
+        rel = al[1]
+        if _lib_file(al[0], rel):
+            return u
         ent = _LOGO_CACHE.get(u)
-        if ent and now - ent[0] < LOGO_TTL:
+        if ent and time.time() - ent[0] < LOGO_TTL:
             if ent[1]:
                 return u
-            continue
-        ok = _check_logo(u)
-        _LOGO_CACHE[u] = [now, ok]
-        if ok:
-            return u
+        else:
+            ok = _check_logo(u)
+            _LOGO_CACHE[u] = [time.time(), ok]
+            if ok:
+                return u
+    # 1) 离线图库直查(优先，秒回且永不出错)
+    u = _resolve_logo_local(name)
+    if u:
+        return u
+    # 2) 源自带的台标：只接受白名单两库，且必须能从本地磁盘或网络验证
+    if src_logo and _filter_logo(src_logo):
+        if _logo_from_disk(src_logo):
+            return src_logo
+        ent0 = _LOGO_CACHE.get(src_logo)
+        if ent0 and not ent0[1] and (time.time() - ent0[0]) < LOGO_TTL:
+            pass  # 已知彻底失效
+        else:
+            return src_logo
     return ""
 
 
@@ -1646,6 +2773,8 @@ class Updater:
                         sl["speed"] = speed
                     if res_h:
                         sl["res"] = res_h
+                    if recs[0].get("codec"):
+                        sl["codec"] = recs[0]["codec"]
             with lock:
                 counter[0] += 1
                 self.state["done"] = counter[0]
@@ -1729,7 +2858,7 @@ class Updater:
         def one(item):
             _, ch = item
             try:
-                ch["logo"] = resolve_logo(ch["name"], ch.get("logo", ""))
+                ch["logo"] = _filter_logo(resolve_logo(ch["name"], ch.get("logo", "")))
             except Exception:
                 pass
             cnt[0] += 1
@@ -1739,6 +2868,24 @@ class Updater:
         with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
             list(ex.map(one, todo))
         _save_logo_cache()
+        # 台标配色：透明底白图在浅色界面上等于看不见，要把底垫深（缓存里没有就现解一遍）
+        for _, ch in todo:
+            u = ch.get("logo") or ""
+            if not u:
+                continue
+            kind = _LOGO_KIND.get(u)
+            if not kind:
+                got = _logo_from_disk(u)
+                if got is None:
+                    # 磁盘里没有(台标是缓存命中直接返回的地址，当初没落过盘)：
+                    # 现抓一次，顺手写盘 + 记 kind，下次就不再来这一趟
+                    _check_logo(u)
+                    kind = _LOGO_KIND.get(u)
+                else:
+                    kind = logo_kind(got[1], u)
+                    if kind:
+                        _LOGO_KIND[u] = kind
+            ch["logo_kind"] = kind or ""
         n_logo = sum(1 for _, ch in todo if ch["logo"])
         log("台标解析完成: %d/%d 频道有台标(%.0fs)" % (n_logo, len(todo), time.monotonic() - t_logo0))
 
@@ -1747,20 +2894,43 @@ class Updater:
     def finalize(merged, backups):
         out = {}
         for k, ch in merged.items():
-            live = sorted((s for s in ch["sources"] if s["live"]), key=score_src)
-            best = pick_best_source(ch)   # 程序权威筛选的唯一最佳源(画质=名称+流内实测分辨率)
+            live = sorted((s for s in ch["sources"] if s["live"]),
+                          key=lambda s: (-_src_quality(s, ch), (s.get("ttfb") or 9999)))
+            best = pick_best_source(ch)   # 程序权威筛选的唯一最佳源(画质=实测分辨率+实测码率)
             q = ch["quality"] or ""
+            qlv, qlabel = 0.0, ""
             if best:
                 rh = best.get("res") or 0
-                if rh >= 2000:
-                    q = "4K"
-                elif rh >= 1000 and q != "4K":
-                    q = "1080P"
-                elif rh >= 620 and q not in ("1080P", "4K"):
-                    q = "HD"
+                mb = best.get("mbps") or 0
+                res_est = False
+                if not rh:
+                    # 这个源的码流读不出分辨率(被加扰/私有封装)：同一个频道的其它源读出来了就借过来，
+                    # 同一个台基本不会换分辨率；界面上标"≈"提醒是推断值，不是这条源实测的
+                    alt = max((int(s.get("res") or 0) for s in ch["sources"]), default=0)
+                    if alt > 0:
+                        rh, res_est = alt, True
+                rl, ml = res_level(rh), mbps_level(mb)
+                known = [x for x in (rl, ml) if x is not None]
+                qlv = min(known) if known else 0.0
+                # 角标按用户门槛给结论：清晰 = 分辨率≥1080P 且 码率≥2M；不足的直说缺什么
+                qlabel = quality_label(mb, rh)
+                rtxt = res_label(rh)
+                if rtxt and clear_enough(mb, rh):
+                    q = rtxt
+                elif rtxt:
+                    q = rtxt + " · " + qlabel
+                elif qlabel:
+                    q = qlabel
             out[k] = {
                 "key": k, "name": ch["name"], "group": ch["group"],
                 "quality": q, "logo": ch["logo"],
+                "mbps": round(float((best or {}).get("mbps") or 0), 2),
+                "res": int(rh if best else 0),
+                "res_est": bool(res_est) if best else False,
+                "codec": (best or {}).get("codec") or "",
+                "speed": round(float((best or {}).get("speed") or 0), 2),
+                "clear": clear_enough((best or {}).get("mbps") or 0, rh if best else 0),
+                "qlv": qlv, "qlabel": qlabel,
                 "sources": live[:backups], "live_count": len(live),
                 "playable": bool(best and best.get("url", "").startswith("http")),
                 "best": best,
@@ -1782,12 +2952,18 @@ class Updater:
 
         def norm(name):
             n = unicodedata.normalize("NFKC", name).lower()
+            # 4K/8K 频道单独成键：不然 "cctv-4k超高清" 会被噪声词剥成 "cctv"，
+            # 跟 8K 甚至别的 cctv 残名撞成一个桶，两条频道被合成一条
+            mk = re.match(r"^cctv[\-\s]?(\d{1,2})\s*k", n.strip())
+            if mk:
+                return "cctv" + mk.group(1) + "k"
             m = cctv_suffix.match(n.strip())
             if m:
                 n = "cctv" + m.group(1)      # 只按频道号归一，后缀丢掉
             n = noise.sub("", n)
             n = re.sub(r"[\s·・\-_/()（）\[\]【】]+", "", n)
-            return n.rstrip("台") or n
+            n = n.rstrip("台") or n
+            return n
 
         buckets = {}
         for k, ch in channels.items():
@@ -1803,7 +2979,10 @@ class Updater:
                 # 人工核对过的精选源名字优先(凤凰资讯台/凤凰中文台 这类，
                 # 聚合源的叫法可能是错的，别让它把精选源的名字顶掉)
                 cur = 1 if any(s3.get("tag") == "curated" for s3 in (ch.get("sources") or [])) else 0
-                return (cur, 1 if best.get("res") else 0, ch.get("live_count") or 0,
+                # 同名多条时，留实测数据更全、画质(分辨率+码率短板)更高的那一条
+                return (cur, 1 if best.get("res") else 0,
+                        round(_src_quality(best, ch), 2) if best else 0,
+                        ch.get("live_count") or 0,
                         1 if (ch.get("quality") or "").endswith("P") or ch.get("quality") == "4K" else 0,
                         -len(ch.get("name") or ""))
             group.sort(key=rank, reverse=True)
@@ -1877,6 +3056,16 @@ class Updater:
             log("去重后 %d 个频道" % len(merged))
             self.verify(merged)
             channels = self.finalize(merged, self.cfg["backups"])
+            # 央视名称统一成台标上的官方写法（CCTV-1 综合 / CCTV-2 财经 / CCTV-4K 超高清）：
+            # 用户拿台标一对就能找到台。原始名字留在 aka，搜索仍能按旧写法命中。
+            # 必须放在"同名合并"之前：改名之后 "CCTV1" 与 "CCTV-1" 才会归成同一条，不然会出两条同名。
+            for ch in channels.values():
+                nm = official_cctv_name(ch.get("name") or "")
+                if not nm:
+                    nm = NAME_FIXES.get(ch.get("name") or "", "")
+                if nm and nm != ch.get("name"):
+                    ch["aka"] = ch["name"]
+                    ch["name"] = nm
             n_before = len(channels)
             channels = self.merge_same_name(channels)
             channels = self.dedupe_by_url(channels)
@@ -1898,6 +3087,9 @@ class Updater:
             tray_busy(False)     # 先把托盘换回三角，再弹提示，免得提示里挂着"更新中"
             tray_notify("更新完成",
                         "%d 个频道可用 · 用时 %.0f 秒" % (st["live"], cost))
+            # 列表先给用户看，吞吐复测放后台补(不挡界面)：整轮 64 路并发摊薄了带宽，
+            # 测出来的吞吐普遍偏低，复测完再把速度徽标刷新成真实值
+            threading.Thread(target=self.net_pass, args=(channels,), daemon=True).start()
             return True
         except Exception as e:
             self.state["error"] = str(e)
@@ -1908,6 +3100,56 @@ class Updater:
             tray_busy(False)     # 不管成功失败，都换回"三角"
             self.state["updating"] = False
 
+    @staticmethod
+    def net_pass(self, channels):
+        """更新完再补一轮"只看吞吐"的实测：整轮探测是 64 路并发跑的，
+        每路分到的带宽被摊薄，测出来的吞吐普遍偏低(实测同一地址单跑 1126KB/s、
+        并发里只有 161KB/s)。这里只挑"看着可疑"的(source speed<400KB/s 或没测到)，
+        8 路并发、每路 1.5 秒，把结果写回 best["speed"] 并落盘。"""
+        targets = []
+        for ch in channels.values():
+            b = ch.get("best") or {}
+            if not b.get("live") or not b.get("url"):
+                continue
+            try:
+                sp = float(b.get("speed") or 0)
+            except Exception:
+                sp = 0.0
+            if sp * 125 < SMOOTH_KBPS:          # 只有可疑的才复测，够快的不再折腾
+                targets.append(ch)
+        if not targets:
+            return
+        targets.sort(key=lambda c: -_src_quality(c.get("best") or {}, c))
+        log("吞吐复测: %d 个频道(8 路并发)" % len(targets))
+        done = [0]
+        lock = threading.Lock()
+
+        def one(ch):
+            b = ch["best"]
+            ok, sp, _res = probe_speed({"url": b.get("url")}, 6)
+            if ok and sp > 0:
+                b["speed"] = max(sp, float(b.get("speed") or 0))
+                # 复测出来的吞吐就是"能不能顺畅播"的硬指标：顺手记一下判据结果
+                b["smooth"] = b["speed"] * 125 >= SMOOTH_KBPS
+            with lock:
+                done[0] += 1
+                self.state["net_done"] = done[0]
+
+        self.state["net_total"] = len(targets)
+        self.state["net_done"] = 0
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                list(ex.map(one, targets))
+        except Exception as e:
+            log("吞吐复测出错: %s" % e)
+        self.save_cache(channels)
+        log("吞吐复测完成: %d/%d 达到 %d KB/s" % (
+            sum(1 for c in targets if (c["best"].get("speed") or 0) * 125 >= SMOOTH_KBPS),
+            len(targets), int(SMOOTH_KBPS)))
+
+    # 注意：本函数不使用实例状态，必须是 staticmethod。
+    # 之前漏写 @staticmethod，导致 load_cache() 里 self.compute_stats(self.channels)
+    # 抛 TypeError -> 缓存被判定"读取失败" -> 每次启动都误触发全量更新并重探测几百条直播流。
     @staticmethod
     def compute_stats(channels):
         by_group = {}
@@ -1922,6 +3164,16 @@ class Updater:
 
     def save_cache(self, channels):
         try:
+            # 频道名强制覆盖（台标/实际称呼与上游数据源不一致时统一）
+            for _old, _new in _CHANNEL_NAME_OVERRIDE.items():
+                if _old in channels:
+                    ch = channels.pop(_old)
+                    ch["name"] = _new
+                    channels[_new] = ch
+            # 台标 URL 强制覆盖（M3U 自带的台标不对时，强制指定正确的台标）
+            for _key, _url in _LOGO_URL_OVERRIDE.items():
+                if _key in channels:
+                    channels[_key]["logo"] = _url
             CACHE_PATH.write_text(json.dumps({
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
                 "channels": channels,
@@ -1940,19 +3192,94 @@ class Updater:
             if age_h > self.cfg["interval_hours"]:
                 return False
             self.channels = data["channels"]
+            # 频道名强制覆盖（加载时就改，避免旧缓存名残留）
+            for _old, _new in _CHANNEL_NAME_OVERRIDE.items():
+                if _old in self.channels:
+                    ch = self.channels.pop(_old)
+                    ch["name"] = _new
+                    self.channels[_new] = ch
+            # 台标 URL 强制覆盖（加载时就改，确保台标正确）
+            for _key, _url in _LOGO_URL_OVERRIDE.items():
+                if _key in self.channels:
+                    self.channels[_key]["logo"] = _url
+            # 读盘后再过一次来源闸口：老缓存里可能残留第三方图库的台标，
+            # 不过滤的话网页列表立刻就又会变得跟 M3U 不一致
+            _n = 0
+            for _ch in self.channels.values():
+                _kept = _filter_logo(_ch.get("logo"))
+                if _kept != (_ch.get("logo") or ""):
+                    _ch["logo"] = _kept
+                    _n += 1
+            if _n:
+                log("台标来源统一：读缓存时清掉 %d 个非白名单图库的台标" % _n)
             self.state["stats"] = self.compute_stats(self.channels)
             self.state["last_update"] = saved.strftime("%Y-%m-%d %H:%M:%S")
             if data.get("source_stats"):
                 self.state["source_stats"] = data["source_stats"]   # 别让设置页在重启后显示"未抓取"
             self.state["next_update"] = time.time() + max(0, self.cfg["interval_hours"] - age_h) * 3600
             log("已加载缓存: %d 频道(%.1f 小时前更新)" % (len(self.channels), age_h))
+            # 台标库扩容补漏：图库加新图后，老缓存里"可用但没台标"的频道
+            # 按新图库离线再查一遍(纯本地文件查找，零出网秒回)，不用等下一轮更新
+            _n2 = 0
+            for _ch in self.channels.values():
+                _nm = _ch.get("name") or ""
+                # 别名表点名的频道(如翡翠台锁 CCSH 那张横版图)：一律以别名为准，
+                # 免得图库扩容后被别的库里的近方/竖版图顶掉
+                _al = LOGO_ALIASES.get(_nm.strip())
+                if _al and _lib_file(_al[0], _al[1]):
+                    _want = _alias_url(_al)
+                    if _ch.get("logo") != _want:
+                        _ch["logo"] = _want
+                        _n2 += 1
+                    try:                      # 配色也按别名那张图重判
+                        _pp = _logo_lib_path_for_url(_want)
+                        if _pp and _pp.exists():
+                            _k2 = logo_kind(_pp.read_bytes(), _want)
+                            if _k2 and _ch.get("logo_kind") != _k2:
+                                _ch["logo_kind"] = _k2
+                                _n2 += 1
+                    except Exception:
+                        pass
+                    continue
+                # 已有台标的：本地重判一遍配色。判定阈值更新后旧结论会过时
+                # (如"亚洲剧"白字+小彩条，旧阈值判成彩图不垫底，浅色界面看不清)
+                if _ch.get("logo"):
+                    try:
+                        _pp = _logo_lib_path_for_url(_ch["logo"])
+                        if _pp and _pp.exists():
+                            _k2 = logo_kind(_pp.read_bytes(), _ch["logo"])
+                            if _k2 and _ch.get("logo_kind") != _k2:
+                                _ch["logo_kind"] = _k2
+                                _n2 += 1
+                    except Exception:
+                        pass
+                    continue
+                if not (_ch.get("best") or {}).get("live"):
+                    continue
+                _u = _resolve_logo_local(_nm)
+                if _u:
+                    _ch["logo"] = _u
+                    try:
+                        _p = _logo_lib_path_for_url(_u)
+                        if _p:
+                            _ch["logo_kind"] = logo_kind(_p.read_bytes(), _u)
+                    except Exception:
+                        pass
+                    _n2 += 1
+            if _n2:
+                log("台标库扩容补漏: 按新图库找到 %d 个频道的台标" % _n2)
+                self.save_cache(self.channels)
             return True
         except Exception as e:
             log("缓存加载失败: %s" % e)
             return False
 
     # ---------- M3U 写出(每频道只写程序筛选出的唯一最佳源，不列备选) ----------
-    def write_m3u(self, path, keys=None):
+    def write_m3u(self, path, keys=None, logo_via=None):
+        """logo_via: 局域网订阅(/list.m3u)时传本机中转前缀(如 "http://192.168.1.5:8902/logo?u=")，
+        tvg-logo 会被改写成经由本机 /logo 取图。原因：台标库在 raw.githubusercontent.com，
+        电视端播放器直连基本拉不下来，台标全是纯文字；而图片已全量缓存在本机 logos/ 目录，
+        局域网内从本机拿图稳定且不出网。网页/桌面导出不传，仍写图库原始地址。"""
         with self.lock:
             channels = self.channels
         if not channels:
@@ -1964,14 +3291,16 @@ class Updater:
         lines.append("# 由 %s v%s 生成于 %s" % (APP_NAME, VERSION, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         n_src = n_ch = n_skip = 0
         n_urls = max(1, min(10, int(self.cfg.get("urls_per_channel") or 3)))
-        lines.append("# 筛选标准：画质(实测分辨率 4K/1080P 优先) > 区域基准 > 链路速度；"
+        lines.append("# 筛选标准：画质=实测分辨率+实测码率(两个指标谁弱谁定上限，短板优先) > 区域基准 > 链路速度；"
                      "每个频道最多写 %d 条实测可用线路" % n_urls)
         present = sorted({ch["group"] for ch in channels.values()},
                          key=lambda g: (GROUP_RANK.index(g) if g in GROUP_RANK else 50, g))
         for g in present:
+            # 组内按画质分(分辨率+码率短板)排，同分再按码率与首包速度
             gch = sorted((c for c in channels.values() if c["group"] == g),
-                         key=lambda c: (-(((c.get("best") or {}).get("speed") or 0)
-                             or ((c.get("best") or {}).get("mbps") or 0)), c["name"]))
+                         key=lambda c: (-_src_quality(c.get("best") or {}, c),
+                                        -((c.get("best") or {}).get("mbps") or 0),
+                                        (c.get("best") or {}).get("ttfb") or 9999, c["name"]))
             for ch in gch:
                 if keys is not None and ch["key"] not in keys:
                     continue
@@ -1987,7 +3316,7 @@ class Updater:
                 if mm and (best.get("mbps") or 0) < mm:
                     n_skip += 1
                     continue
-                # 同一频道所有实测可用线路(分辨率→速率排序)，写前 n_urls 条当备份
+                # 同一频道所有实测可用线路按画质分排序(分辨率+码率短板)，写前 n_urls 条当备份
                 cand = []
                 for sl in (ch.get("sources") or []):
                     if not (sl.get("live") and sl.get("url")):
@@ -1996,8 +3325,8 @@ class Updater:
                     if mm and _m and _m < mm:
                         continue
                     cand.append(sl)
-                cand.sort(key=lambda sl: (-(sl.get("res") or 0),
-                                          -((sl.get("speed") or 0) or (sl.get("mbps") or 0))))
+                cand.sort(key=lambda sl: (-_src_quality(sl, ch), -(sl.get("mbps") or 0),
+                                          (sl.get("ttfb") or 9999)))
                 seen_url, urls = set(), []
                 for sl in cand:
                     if sl["url"] in seen_url:
@@ -2011,8 +3340,12 @@ class Updater:
                 n_ch += 1
                 n_src += len(urls)
                 for _u in urls:
+                    # 写出前再过一次来源闸口(就算内存里还有脏台标也不会进 M3U)
+                    _lg = _filter_logo(ch["logo"])
+                    if _lg and logo_via:      # 局域网订阅：台标走本机中转，电视端必能显示
+                        _lg = logo_via + quote(_lg, safe="")
                     lines.append('#EXTINF:-1 tvg-name="%s" tvg-logo="%s" group-title="%s",%s'
-                                 % (esc_attr(ch["name"]), esc_attr(ch["logo"]), g, ch["name"]))
+                                 % (esc_attr(ch["name"]), esc_attr(_lg), g, ch["name"]))
                     lines.append(_u)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -2052,7 +3385,7 @@ class Updater:
 
 # ---------------------------------------------------------------- 网页控制台
 
-PAGE = r"""﻿<!DOCTYPE html>
+PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN" data-theme="auto">
 <head>
 <meta charset="utf-8">
@@ -2118,7 +3451,7 @@ header{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--card)
 .pbar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),#ff6b7a);transition:width .35s}
 
 /* ---------------- 主体 ---------------- */
-main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
+main{max-width:1120px;margin:0 auto;padding:12px 18px 62px;display:flex;flex-direction:column;min-height:calc(100vh - 62px)}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
 .stat{padding:8px 12px}
@@ -2139,32 +3472,47 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
 .qsep{width:1px;height:20px;background:var(--line);margin:0 2px}
 
 /* 列表 */
-.list{margin-top:10px;overflow:hidden}
-.thead,.tr{display:grid;grid-template-columns:44px 1fr 92px 132px 1fr;align-items:center;gap:8px;padding:0 10px}
+.list{margin-top:10px;overflow:hidden;flex:1 1 auto;display:flex;flex-direction:column;min-height:0}
+.thead,.tr{display:grid;grid-template-columns:30px 104px minmax(0,1fr) 80px 180px minmax(0,1fr);align-items:center;gap:8px;padding:0 10px}
 .thead{height:32px;font-size:12px;color:var(--sub);border-bottom:1px solid var(--line);background:var(--card)}
-.tbody{max-height:calc(100vh - 268px);overflow:auto}
-.tr{height:44px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.tbody{flex:1 1 auto;min-height:200px;overflow:auto}   /* 列表拉伸填充，随窗口高度自适应 */
+.tr{height:72px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
 .tr:hover{background:color-mix(in srgb,var(--accent) 4%,transparent)}
 .tr.dead{opacity:.45}
 .nm{display:flex;align-items:center;gap:9px;min-width:0}
-/* 台标原图多是 300x180 的长图，硬塞进 20x20 的方框里会被缩成一条，字都看不清；
-   这里按高度定尺寸、宽度自适应(最多 40px)，长图也能占满宽度 */
-/* 台标是"透明底+白字/浅色字"，白卡片上会发白看不清：不加底色，
-   改用极细的描边阴影把轮廓勾出来，既清楚又不抢眼 */
-.nm img{height:26px;width:auto;max-width:66px;min-width:26px;border-radius:4px;
-  object-fit:contain;background:transparent;flex:0 0 auto;
-  filter:drop-shadow(0 0 .6px rgba(0,0,0,.75)) drop-shadow(0 1px 1px rgba(0,0,0,.28))}
-.nm .ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
+/* 台标统一排版：所有台标（彩图直显 / 白图垫底）都进同一个 104x40 画框，
+   object-fit:contain 居中——横版(300x180)、竖版(507x597)、宽条(294x77)
+   都完整显示且视觉大小一致，不再撑爆行宽也不被裁切 */
+.nm img{height:40px;width:auto;max-width:104px;min-width:32px;border-radius:5px;
+  object-fit:contain;background:transparent;flex:0 0 auto}
+.lgcol{display:flex;align-items:center;justify-content:center;min-width:0;overflow:hidden}
+/* 表头"台标"两个字与下方居中的台标图对齐 */
+.hlg{text-align:center}
+/* 表头"频道"两个字整体向右内缩一点，避免紧贴台标列显得拥挤 */
+.hch{padding-left:14px}
+.lg{display:flex;align-items:center;justify-content:center;width:104px;height:40px;
+  max-width:104px;min-width:104px;border-radius:6px;flex:0 0 auto;overflow:hidden;padding:0 3px}
+.lg img{width:100%;height:100%;object-fit:contain}
+.lg.dk{background:transparent;box-shadow:none}
+.lg.dk img{filter:brightness(0) saturate(0);opacity:.46}
+.ph{width:26px;height:26px;border-radius:4px;background:transparent;color:#9aa4b2;flex:0 0 auto;
   display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
-.nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}
 .nsrc{font-size:11px;color:var(--sub);background:var(--bg);border-radius:6px;padding:0 5px;flex:0 0 auto}
 .grp{font-size:12.5px;color:var(--sub)}
-.qa{display:flex;align-items:center;gap:6px;font-size:12.5px}
-.tag{font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;background:var(--bg);color:var(--sub);border:1px solid var(--line)}
+.qa{display:flex;align-items:center;gap:6px;font-size:12.5px;min-width:0;flex-wrap:nowrap}
+.tag{font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;background:var(--bg);color:var(--sub);border:1px solid var(--line);flex:0 0 auto}
 .tag.q4{color:#7c3aed;border-color:#ddd6fe;background:#f5f3ff}
 .tag.q3{color:#0369a1;border-color:#bae6fd;background:#f0f9ff}
 .tag.q2{color:#4d7c0f;border-color:#d9f99d;background:#f7fee7}
-.spd{font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+.tag.q1{color:#9a3412;border-color:#fed7aa;background:#fff7ed}
+.tag.q0{color:#b91c1c;border-color:#fecaca;background:#fef2f2}
+.spd{font-size:11px;color:var(--sub);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cd{font-size:10px;font-weight:700;color:#6b7280;background:var(--bg);border:1px solid var(--line);
+  border-radius:4px;padding:0 4px;flex:0 0 auto;margin-left:2px}
+.net{font-size:10.5px;font-variant-numeric:tabular-nums;border-radius:5px;padding:0 4px;flex:0 0 auto}
+.net.ok{color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0}
+.net.slow{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca}
 .host{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px;min-width:0}
 .host .h{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mini{opacity:0;height:22px;padding:0 8px;border-radius:7px;border:1px solid var(--line);
@@ -2173,12 +3521,19 @@ main{max-width:1120px;margin:0 auto;padding:12px 18px 84px}
 .mini:hover{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
 .lowb{font-size:10.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;
   border-radius:5px;padding:0 4px;flex:0 0 auto}
+.lowr{font-size:10.5px;color:#1d4ed8;background:#eff6ff;border:1px solid #bfdbfe;
+  border-radius:5px;padding:0 4px;flex:0 0 auto}
 input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
 .empty{padding:36px 16px;text-align:center;color:var(--sub);font-size:13px}
 
 /* 底栏 */
 footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in srgb,var(--card) 94%,transparent);
   backdrop-filter:blur(10px);border-top:1px solid var(--line)}
+.foot{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;flex-wrap:wrap;
+  margin-top:auto;margin-bottom:0;text-align:center;font-size:11.5px;color:var(--sub);
+  min-height:34px;padding:4px 0;line-height:1.4}
+.foot a{color:var(--sub);text-decoration:none}
+.foot a:hover{color:var(--accent);text-decoration:underline}
 .fbar{max-width:1120px;margin:0 auto;padding:8px 18px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sel{font-size:13px;color:var(--sub);white-space:nowrap}
 .sel b{color:var(--accent)}
@@ -2229,8 +3584,6 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media(max-width:820px){
   .cards{grid-template-columns:1fr 1fr}
-  .thead,.tr{grid-template-columns:40px 1fr 92px 118px 0;gap:6px}
-  .thead>div:nth-child(5),.tr>*:nth-child(5){display:none}
   #fname{width:110px}
 }
 
@@ -2241,6 +3594,8 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
   .fbar{gap:6px}
   .dlg{width:min(94vw,720px);max-height:92vh}
   .grid2{grid-template-columns:1fr 1fr}
+  .thead,.tr{grid-template-columns:30px 96px minmax(0,1fr) 80px 160px 0;gap:6px;padding:0 6px}
+  .thead>div:nth-child(6),.tr>*:nth-child(6){display:none}
 }
 
 /* ---------- 手机 ---------- */
@@ -2262,13 +3617,12 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
   .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px;-webkit-overflow-scrolling:touch}
   .chips::-webkit-scrollbar{display:none}
   .chip{flex:0 0 auto}
-  /* 手机只留：勾选 + 台标名称 + 速度；分组/首选源收进名称下面一行小字 */
-  .thead,.tr{grid-template-columns:30px 1fr 74px;gap:6px;padding:0 6px}
+  /* 手机只留：勾选 + 台标 + 频道名 + 速率；分组/首选源隐藏 */
+  .thead,.tr{grid-template-columns:30px 60px minmax(0,1fr) 74px;gap:6px;padding:0 6px}
   /* 手机上只留速率，"1080P"这类画质标签和数字挤在一起会换行 */
   .tr .qa>span:first-child{display:none}
-  .thead>div:nth-child(3),.thead>div:nth-child(5),
-  .tr>*:nth-child(3),.tr>*:nth-child(5){display:none}
-  .tr>*:nth-child(4){display:block;text-align:right;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thead>div:nth-child(4),.thead>div:nth-child(6),
+  .tr>*:nth-child(4),.tr>*:nth-child(6){display:none}
   .tr .qa .spd{font-size:11.5px}
   .tr{height:auto;min-height:46px;padding-top:6px;padding-bottom:6px}
   .nm{white-space:normal;line-height:1.3}
@@ -2295,7 +3649,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
   .brand b{font-size:14px}
   .hbar .btn{height:28px;padding:0 8px;font-size:12px}
   .stat b{font-size:16px}
-  .thead,.tr{grid-template-columns:30px 1fr 74px}
+  .thead,.tr{grid-template-columns:30px 56px minmax(0,1fr) 70px}
 }
 .legal[hidden]{display:none !important}
 </style>
@@ -2333,7 +3687,9 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
       <input class="search" id="q" placeholder="搜索频道名，例如 CCTV5 / 翡翠台 / 湖南卫视">
       <select class="field sortsel" id="sort" title="排序方式">
         <option value="hot">常用优先（CCTV · 卫视 · 港澳台在前）</option>
-        <option value="speed">最快优先</option>
+        <option value="quality">画质优先（实测分辨率 × 码率）</option>
+        <option value="bitrate">码率优先</option>
+        <option value="speed">网络最快优先（不卡）</option>
         <option value="group">按分组</option>
         <option value="name">按名称</option>
       </select>
@@ -2342,18 +3698,31 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
     </div>
     <div class="row chips" id="chips"></div>
     <div class="row chips" id="chipsQ">
-      <button class="chip" data-q="4">4K</button>
-      <button class="chip" data-q="1080P">1080P</button>
-      <button class="chip" data-q="HD">高清</button>
+      <button class="chip" data-f="pass" title="用户的标准：分辨率 ≥1080P、码率 ≥2 Mbps、下载吞吐 ≥400 KB/s，三条全满足">达标（1080P+ 清晰不卡）</button>
+      <button class="chip" data-f="ok" title="分辨率 ≥1080P 且 码率 ≥2 Mbps（只看画面清晰，不管网络速度）">仅看清晰</button>
+      <button class="chip" data-s="1" title="实测下载吞吐 ≥400 KB/s（≈3.2 Mbps）—— 达到这个速度看着不卡">网络 400KB/s+</button>
       <span class="qsep"></span>
-            <button class="chip" data-qk="alive">仅可用</button>
+      <button class="chip" data-r="4" title="实测分辨率 4K（≥2000 像素）">4K</button>
+      <button class="chip" data-r="3" title="实测分辨率 1080P">1080P</button>
+      <button class="chip" data-r="2" title="实测分辨率 720P">720P</button>
+      <span class="qsep"></span>
+      <button class="chip" data-q="4" title="实测码率 ≥9 Mbps">码率≥9M</button>
+      <button class="chip" data-q="3" title="实测码率 ≥5 Mbps">码率≥5M</button>
+      <button class="chip" data-q="2" title="实测码率 ≥2.5 Mbps">码率≥2.5M</button>
+      <button class="chip" data-q="low" title="实测码率不到 2 Mbps（用户：这个码率画面就一般了）">码率不足2M</button>
+      <button class="chip" data-q="lowr" title="实测分辨率不到 720P，码率再高画面也细不了">分辨率偏低</button>
+      <span class="qsep"></span>
+      <button class="chip" data-qk="alive">仅可用</button>
     </div>
   </div>
 
   <div class="card list">
-    <div class="thead"><div><input type="checkbox" id="ckAll"></div><div>频道</div><div>分组</div><div>画质 / 实测</div><div>首选源</div></div>
+    <div class="thead"><div><input type="checkbox" id="ckAll"></div><div class="hlg">台标</div><div class="hch">频道</div><div>分组</div><div>画质（分辨率·码率）</div><div>首选源</div></div>
     <div class="tbody" id="rows"><div class="empty">点右上角「立即更新」开始检测直播源。<br><span class="hint">每一轮都会重新实测，不会沿用上次的结果。</span></div></div>
   </div>
+
+  <div class="foot"><span>LIVE直播源 · 作者 海风（kele551）</span>
+    <a href="https://github.com/kele551/LiveIPTV" target="_blank" rel="noopener">github.com/kele551/LiveIPTV</a></div>
 </main>
 
 <footer>
@@ -2378,7 +3747,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
         <div class="grid2">
           <div class="f">自动更新间隔（小时）<input type="number" id="c_int" min="1" max="72"></div>
           <div class="f">每个频道备用源数量<input type="number" id="c_bak" min="1" max="8"></div>
-    <div class="f">最低码率 Mbps（低于此值当假的，0=不限）
+    <div class="f">最低码率 Mbps（低于此值不显示、不导出，0=不限）
       <input type="number" id="c_min" min="0" max="50" step="0.5"></div>
           <div class="f">EPG 节目单地址（可留空）<input type="text" id="c_epg" placeholder="http://…/epg.xml"></div>
           <div class="f">保存位置<input type="text" id="c_out" placeholder="M3U 输出路径"></div>
@@ -2443,7 +3812,7 @@ footer{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in
 <div id="toast"></div>
 <script>
 "use strict";
-var CH=[], sel=new Set(), grp="", qf="", qk="", q="", sk="hot", lastLoaded="", timer=null, dirty=false;
+var CH=[], sel=new Set(), grp="", rf="", qf="", qk="", sf="", q="", sk="hot", lastLoaded="", timer=null, dirty=false;
 var fresh=false, wasUpdating=false;   // fresh=本次打开后跑完过一轮更新，才把频道列出来
 var GORDER=["央视","卫视","香港","澳门","台湾","体育","电影","少儿","游戏","国际·综合","地方台","其他"];
 var $=function(id){return document.getElementById(id)};
@@ -2467,18 +3836,60 @@ function applyTheme(){
 if(window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",applyTheme);
 applyTheme();
 
+// 画质判据（与后端 _src_quality / quality_label 同一套口径，按用户 2026-10-20 给的门槛）：
+//   清晰 = 实测分辨率 ≥1080P 且 实测码率 ≥2 Mbps；
+//   流畅 = 实测下载吞吐 ≥400 KB/s（≈3.2 Mbps，不够就会转圈/卡顿）。
+// 界面上两个指标都亮出来，别只给一个数字让用户猜。
+var REST=[[2000,4,"4K"],[1000,3,"1080P"],[620,2,"720P"],[400,1,"480P"]];
+var CLARITY_H=1000, CLARITY_MB=2.0, SMOOTH_KB=400;
+function resLv(r){ r=r||0; if(r<=0) return 0; for(var i=0;i<REST.length;i++){ if(r>=REST[i][0]) return REST[i][1] } return 0.3 }
+function mbLv(m){ m=m||0; if(m<=0) return 0; if(m>=9) return 4; if(m>=5) return 3; if(m>=2.5) return 2; if(m>=1) return 1; return 0.3 }
+function resName(r){ var l=resLv(r); if(!l) return ""; if(l<1) return "低分辨率";
+  for(var i=0;i<REST.length;i++){ if(l===REST[i][1]) return REST[i][2] } return "" }
+// 吞吐：后端 speed 单位是 Mbps，换算成 KB/s 更接近用户看的播放器数字
+function kbps(c){ var b=c.best||{}; return (b.speed||0)*125 }
+function mbpsTxt(m){ return (m||0).toFixed(1)+"M" }
+function qScore(c){
+  var b=c.best||{}, m=b.mbps||0, rs=resLv(b.res||0);
+  if(!(m>0)) return rs?(rs*10*0.35):2.0;
+  var adequate=Math.min(1, m/CLARITY_MB);
+  var bonus=Math.min(1, m/10)*5;
+  var base=rs||2.0;                      // 没测到分辨率按 720P 记，不虚高也不打死
+  return base*10*(0.55+0.45*adequate)+bonus;
+}
+function clearEnough(c){ var b=c.best||{}; return (b.res||0)>=CLARITY_H && (b.mbps||0)>=CLARITY_MB }
+function smoothEnough(c){ return kbps(c)>=SMOOTH_KB }
+function lowBit(c){ var m=(c.best||{}).mbps||0; return m>0 && m<CLARITY_MB }
+function lowRes(c){ var r=(c.best||{}).res||0; return r>0 && r<620 }
+// 画质列：分辨率档 + 实测码率，两个数字并排，缺哪个标哪个
+function detailText(c){
+  // 鼠标悬停看这一路的全部实测细节：分辨率(像素)、编码、码率、我这边的下载速度、首包延迟
+  var b=c.best||{}, p=[];
+  if(b.res_wh&&b.res_wh[0]) p.push("实测分辨率 "+b.res_wh[0]+"×"+b.res_wh[1]);
+  else if(b.res) p.push("分辨率 "+(c.res_est?"≈":"")+b.res+"p"+(c.res_est?"(借同频道其它源)":""));
+  if(b.codec) p.push("编码 "+b.codec);
+  if(b.mbps) p.push("码率 "+b.mbps+" Mbps");
+  if(b.speed) p.push("下载 "+Math.round(kbps(c))+" KB/s");
+  if(b.ttfb) p.push("首包 "+b.ttfb+" ms");
+  p.push("可用线路 "+(c.live_count||(c.sources||[]).length)+" 条");
+  return p.join(" · ");
+}
 function spd(c){
-  var s=c.best||{}, r=s.res||0, m=s.mbps||0;
-  if(r>=2000) return "4K";
-  if(r>=1000) return "1080P";
-  if(r>=620) return "HD";
-  return c.quality||"";
+  var b=c.best||{}, rn=resName(b.res||0), m=b.mbps||0;
+  if(rn && c.res_est) rn="≈"+rn;      // 这个源的码流读不出分辨率，借同频道其它源的实测值
+  var parts=[];
+  if(rn) parts.push(rn); else if(b.live) parts.push("分辨率未测");
+  if(m>0) parts.push("码率"+mbpsTxt(m)); else if(b.live) parts.push("码率未测");
+  if(!parts.length) return c.quality||"";
+  return parts.join(" · ");
 }
 function tagCls(c){
-  var r=((c.best||{}).res)||0;
-  if(r>=2000) return "tag q4";
-  if(r>=1000) return "tag q3";
-  if(r>=620) return "tag q2";
+  var b=c.best||{};
+  if(!b.live) return "tag";
+  if(clearEnough(c)) return ((b.res||0)>=1800?"tag q4":"tag q3");
+  if(lowBit(c)) return "tag q1";                       // 分辨率够、码率不够(湖南卫视那种)
+  if(lowRes(c)) return "tag q1";                       // 码率够、分辨率不够
+  if((b.res||0)>=620) return "tag q2";
   return "tag";
 }
 function host(u){ try{ return new URL(u).host; }catch(e){ return u||"" } }
@@ -2490,17 +3901,35 @@ function cnum(n){ var m=(n||"").match(/cctv[-\s]*(\d{1,2})/i); return m?+m[1]:99
 // 同号里把"标准台"排前面(CCTV4 在 CCTV4K / CCTV-4 Europe 之前)
 function cbase(n){ return /^cctv[-\s]?\d{1,2}$/i.test((n||"").trim())?0:1 }
 function mb(c){ var b=c.best||{}; return b.speed||b.mbps||0 }
+function mbbr(c){ var b=c.best||{}; return b.mbps||0 }
 function filtered(){
   var kw=q.trim().toLowerCase();
   var list=CH.filter(function(c){
     if(grp && c.group!==grp) return false;
-    if(qf && spd(c)!==qf) return false;
+    var b=c.best||{};
+    if(rf && String(resLv(b.res||0))!==rf) return false;           // 按实测分辨率筛
+    if(sf && !smoothEnough(c)) return false;                       // 网络 ≥400KB/s
+    if(qf==="pass" && !(clearEnough(c) && smoothEnough(c))) return false;   // 用户标准：清晰+不卡
+    if(qf==="ok" && !clearEnough(c)) return false;                 // 清晰：分辨率+码率都达标
+    if(qf==="low" && !lowBit(c)) return false;                     // 码率不足 2M
+    if(qf==="lowr" && !lowRes(c)) return false;                    // 分辨率偏低
+    if(qf && "01234".indexOf(qf)>=0){
+      var m=b.mbps||0;
+      if(!(m>0)) return false;
+      if(String(mbLv(m))!==qf) return false;                       // 按实测码率档筛
+    }
     if(qk==="hkmt" && !isHkmt(c)) return false;
     if(qk==="alive" && !(c.best&&c.best.live)) return false;
-    if(kw && (c.name||"").toLowerCase().indexOf(kw)<0) return false;
+    if(kw && ((c.name||"")+" "+(c.aka||"")).toLowerCase().indexOf(kw)<0) return false;
     return true;
   });
   list.sort(function(a,b){
+    if(sk==="quality"){                    // 画质优先：分辨率+码率短板算出来的综合分
+      var d=qScore(b)-qScore(a);
+      if(d) return d;
+      var g4=gidx(a.group)-gidx(b.group);
+      if(g4) return g4;
+    }
     if(sk==="hot"||sk==="group"){
       var g=gidx(a.group)-gidx(b.group);   // 常看的组在前(CCTV/卫视/港澳台)
       if(g) return g;
@@ -2508,7 +3937,13 @@ function filtered(){
       if(ca!==cb) return ca-cb;
       var ba=cbase(a.name), bb=cbase(b.name);
       if(ba!==bb) return ba-bb;
-      if(sk==="hot"){ var d0=mb(b)-mb(a); if(d0) return d0 }
+      if(sk==="hot"){ var d0=qScore(b)-qScore(a); if(d0) return d0 }
+    }
+    if(sk==="bitrate"){                    // 纯按实测码率排(带宽有限时用)
+      var d1=(mbbr(b)-mbbr(a));
+      if(d1) return d1;
+      var g5=gidx(a.group)-gidx(b.group);
+      if(g5) return g5;
     }
     if(sk==="speed"){
       var d=mb(b)-mb(a);
@@ -2557,7 +3992,10 @@ function esc(s){
 }
 function renderQ(){
   [].forEach.call($("chipsQ").querySelectorAll(".chip"),function(b){
-    var on = b.dataset.q ? (qf===b.dataset.q) : (qk===b.dataset.qk);
+    var on;
+    if(b.dataset.r!==undefined) on = (rf===b.dataset.r);
+    else if(b.dataset.q!==undefined) on = (qf===b.dataset.q);
+    else on = (qk===b.dataset.qk);
     b.classList.toggle("on", !!on);
   });
 }
@@ -2575,13 +4013,18 @@ function renderRows(){
     var n=(c.sources||[]).length;
     html+='<div class="tr'+(alive?"":" dead")+'" data-k="'+esc(c.key)+'">'
       +'<div><input type="checkbox" data-ck="'+esc(c.key)+'"'+(sel.has(c.key)?" checked":"")+'></div>'
-      +'<div class="nm">'+(c.logo?('<img loading="lazy" src="'+esc(c.logo)+'" onerror="this.style.visibility=\'hidden\'">'):logoTile(c.name))
-      +'<span class="t">'+esc(c.name)+'</span>'+(n>1?'<span class="nsrc">'+n+' 源</span>':'')+'</div>'
+      +'<div class="lgcol">'+(c.logo?('<span class="lg'+(c.logo_kind==="white"?" dk":"")+'"><img loading="lazy" src="'+esc(c.logo)+'" onerror="this.style.visibility=\'hidden\'"></span>'):logoTile(c.name))+'</div>'
+      +'<div class="nm"><span class="t">'+esc(c.name)+'</span>'+(n>1?'<span class="nsrc">'+n+' 源</span>':'')+'</div>'
       +'<div class="grp">'+esc(c.group)+'</div>'
-      +'<div class="qa"><span class="'+tagCls(c)+'">'+esc(spd(c)||"未知")+'</span>'
-      +'<span class="spd">'+(alive?(c.best.mbps?(c.best.mbps.toFixed(1)+" Mbps"):"可用"):"不可用")+'</span></div>'
+      +'<div class="qa" title="'+esc(alive?detailText(c):"这一路没连上")+'"><span class="'+tagCls(c)+'">'+esc((c.qlabel||spd(c))||"未知")+'</span>'
+      +'<span class="spd">'+esc(alive?(spd(c)||"已实测"):"不可用")+'</span>'
+      +(alive&&c.best&&c.best.codec?'<span class="cd" title="实测编码">'+esc(c.best.codec)+'</span>':'')+'</div>'
       +'<div class="host"><span class="h">'+esc(alive?host(c.best.url).split(":")[0]:"—")+'</span>'
-      +((alive&&c.best.mbps&&c.best.mbps<2)?'<span class="lowb" title="码率不到 2 Mbps，多半是压缩转发源，画面不一定是这个台">低码率</span>':'')
+      +((alive&&kbps(c)>0)?('<span class="net'+(smoothEnough(c)?" ok":" slow")+'" title="实测下载吞吐：'+
+          (smoothEnough(c)?"达到 400 KB/s，看着不卡":"不到 400 KB/s，可能转圈/卡顿")+'">'+
+          Math.round(kbps(c))+' KB/s</span>'):'')
+      +((alive&&lowBit(c))?'<span class="lowb" title="码率不到 2 Mbps：用户实测这个码率画面就一般了">码率不足</span>':'')
+      +((alive&&lowRes(c))?'<span class="lowr" title="实测分辨率不到 720P，码率再高画面也细不了">分辨率低</span>':'')
       +'</div>'
       +'</div>';
   });
@@ -2683,8 +4126,16 @@ $("chips").addEventListener("click",function(e){
 });
 $("chipsQ").addEventListener("click",function(e){
   var b=e.target.closest(".chip"); if(!b) return;
-  if(b.dataset.q){ qf=(qf===b.dataset.q)?"":b.dataset.q; qk=""; }
-  else { qk=(qk===b.dataset.qk)?"":b.dataset.qk; qf=""; }
+  if(b.dataset.r!==undefined){
+    rf=(rf===b.dataset.r)?"":b.dataset.r;
+    qf=""; sf="";                                   // 分辨率筛与"清晰/码率"互斥，免得筛出 0 条
+  } else if(b.dataset.q!==undefined){
+    qf=(qf===b.dataset.q)?"":b.dataset.q; rf=""; sf="";
+  } else if(b.dataset.s!==undefined){
+    sf=sf?"":"1"; rf=""; qf="";
+  } else {
+    qk=(qk===b.dataset.qk)?"":b.dataset.qk;
+  }
   renderQ(); renderRows();
 });
 $("rows").addEventListener("click",function(e){
@@ -2913,29 +4364,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "bad logo url")
                 return
             data = _LOGO_BYTES.get(u) or _logo_from_disk(u)
-            if data is None and u in _LOGO_CACHE and _LOGO_CACHE[u][1]:
-                # 只转发"服务端亲手验证过"的地址，避免变成任意代理
-                ent = _LOGO_CACHE.get(u)
-                if not (ent and ent[1]):
-                    ok = _check_logo(u)
-                    _LOGO_CACHE[u] = [time.time(), ok]
-                    if not ok:
-                        self.send_error(404, "logo not available")
-                        return
+            if data is None:
+                # 内存/磁盘都没有：现取一次（带缓存落盘），拿不到就 404，绝不崩溃成 500
                 try:
-                    hdr = dict(UA)
-                    hdr["Referer"] = u.rsplit("/", 1)[0] + "/"
-                    req = urllib.request.Request(u, headers=hdr)
-                    with urllib.request.urlopen(req, timeout=8, context=_SSL_CTX) as r:
-                        ctype = r.headers.get("Content-Type") or "image/png"
-                        body = r.read(400 * 1024)
+                    _check_logo(u)
                 except Exception:
-                    self.send_error(404, "logo fetch failed")
-                    return
-                if len(_LOGO_BYTES) > _LOGO_BYTES_MAX:
-                    _LOGO_BYTES.clear()
-                data = (ctype, body)
-                _LOGO_BYTES[u] = data
+                    pass
+                data = _LOGO_BYTES.get(u) or _logo_from_disk(u)
+            if data is None:
+                self.send_error(404, "logo not available")
+                return
             self.send_response(200)
             self.send_header("Content-Type", data[0])
             self.send_header("Content-Length", str(len(data[1])))
@@ -2948,7 +4386,14 @@ class Handler(BaseHTTPRequestHandler):
                 chs = list(self.updater.channels.values())
             tmp = Path(tempfile.gettempdir()) / "live_iptv_lan.m3u"
             try:
-                self.updater.write_m3u(tmp)
+                # 局域网订阅的台标必须走本机中转：raw.githubusercontent 电视端直连拉不下来。
+                # 用请求自带 Host(播放器访问哪个 IP 就回哪个 IP)，拿不到再退 _lan_ip()。
+                _host = (self.headers.get("Host") or "").strip()
+                if not _host:
+                    _ip = _lan_ip()
+                    _host = "%s:%d" % (_ip, _SERVER.server_address[1]) if _ip else \
+                            "127.0.0.1:%d" % _SERVER.server_address[1]
+                self.updater.write_m3u(tmp, logo_via="http://%s/logo?u=" % _host)
                 body = tmp.read_bytes()
             except Exception as e:
                 body = ("#EXTM3U\n# 生成失败: %s\n" % e).encode("utf-8")
@@ -3017,13 +4462,16 @@ class Handler(BaseHTTPRequestHandler):
                 channels = [c for c in channels if c.get("group") != "地方台"]
             channels.sort(key=lambda c: (GROUP_RANK.index(c["group"]) if c["group"] in GROUP_RANK else 50,
                                          cctv_num(c["name"]), cctv_base(c["name"]),
-                                         -((c["best"].get("speed") or 0) or (c["best"].get("mbps") or 0)), c["name"]))
+                                         -_src_quality(c["best"], c),
+                                         -((c["best"].get("mbps") or 0) or (c["best"].get("speed") or 0)),
+                                         c["name"]))
             # 台标一律走本机中转：图标站有防盗链/跨域，直连在浏览器里就是一个个灰方块
             out = []
             for c in channels:
                 c2 = dict(c)
-                lg = (c2.get("logo") or "").strip()
-                c2["logo"] = ("/logo?u=" + quote(lg, safe="")) if lg.startswith(("http://", "https://")) else ""
+                # 网页列表同样过来源闸口，跟 M3U 保持一套
+                lg = _filter_logo(c2.get("logo"))
+                c2["logo"] = ("/logo?u=" + quote(lg, safe="") + "&v=" + _logo_version(lg)) if lg.startswith(("http://", "https://")) else ""
                 out.append(c2)
             channels = out
             return self._json({"channels": channels,
