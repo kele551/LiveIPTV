@@ -77,7 +77,7 @@ VSVersionInfo(
           StringStruct('OriginalFilename', 'LIVE直播源.exe'),
           StringStruct('ProductName', 'LIVE直播源'),
           StringStruct('ProductVersion', '{v}'),
-        StringStruct('Comments', 'https://github.com/kele551/LiveIPTV')
+        StringStruct('Comments', 'github.com/kele551/LiveIPTV')
         ]
       )
     ]),
