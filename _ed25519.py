@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 作者: 海风（kele551）   https://gitee.com/kele551/hotnews
+# 作者: 海风（kele551）   https://github.com/kele551/LiveIPTV
 """Ed25519 纯 Python 实现（签名 + 验签），零第三方依赖。
 
 【为什么自己写】这台机器上 cryptography / nacl / rsa 一个都没有装，
@@ -11,7 +11,7 @@ Ed25519 的参考实现很短（Bernstein 等人论文附带的 Python 版），
   · 发布端（tools/publish.py）：用私钥给 version.json 签名
   · 客户端（updater.py）：用内置公钥验签，**验不过就拒绝升级**
 
-这样即便 Gitee 账号被盗、有人推了恶意 version.json + 恶意 exe，
+这样即便 GitCode 账号被盗、有人推了恶意 version.json + 恶意 exe，
 没有私钥就签不出合法签名，客户端会直接拒绝。
 
 正确性由 tests_ed25519.py 用 RFC 8032 官方测试向量验证。
