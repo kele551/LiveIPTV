@@ -35,11 +35,13 @@ WANT_FN = ("_epg_norm", "_epg_name_keys", "_epg_hhmm", "_epg_ts", "_epg_parse",
            "_bepg_save_cache", "_bepg_load_cache", "bepg_refresh",
            # 2026-11-02 新加的两条判据：繁简归一(台名对得上才有节目单)、码率按分辨率分档
            "_simplify", "_trad", "bit_floor", "low_bitrate", "quality_label",
-           "_quality_stripped", "_uniq_nonempty", "_logo_cands")
+           "_quality_stripped", "_uniq_nonempty", "_logo_cands",
+           # 2026-11-02 升级通道：下载地址怎么排、镜像前缀怎么剥
+           "_strip_mirror", "_update_urls")
 # 函数体里会引用的模块级常量（不摘就会 NameError，摘了等于把"改了哪个数字"也测进去）
 WANT_CONST = ("_EPG_NOISE", "CHANNEL_ALIAS", "CEPG_TTL", "CEPG_RETRY", "CEPG_ROLL",
               "CEPG_URL", "CEPG_CHANNELS", "CEPG_ALIAS",
-              "BEPG_URLS", "BEPG_TTL", "BEPG_RETRY", "BEPG_GENERIC", "BEPG_JUNK",
+              "BEPG_URLS", "BEPG_TTL", "BEPG_RETRY", "BEPG_GENERIC", "BEPG_JUNK", "UPDATE_MIRRORS",
               # 2026-11-02：繁简表、码率分档表、以及"哪条源默认开"这张表
               "_TRAD_S2T", "_T2S", "_QUAL_DEC", "BIT_FLOOR",
               "CLARITY_HEIGHT", "CLARITY_MBPS", "SOURCES")
@@ -252,10 +254,12 @@ def main():
     sites = ssl_sites()
     strict = sorted(n for n, c in sites if c == "_SSL_STRICT")
     lenient = sorted(n for n, c in sites if c == "_SSL_CTX")
+    # 2026-11-02：升级包的下载从 apply_self_update 里拆成了 _fetch_update_blob（分块读 + 总时限 +
+    # 多地址重试），严格 TLS 仍然只出现在"读升级清单"和"下升级包"这两处，没有扩散到别处。
     check("走 _SSL_STRICT 的就是升级那两处", strict,
-          ["_fetch_bytes", "apply_self_update"])
+          ["_fetch_bytes", "_fetch_update_blob"])
     check("升级那两处不再吃 _SSL_CTX",
-          [c for n, c in sites if n in ("_fetch_bytes", "apply_self_update") and c == "_SSL_CTX"], [])
+          [c for n, c in sites if n in ("_fetch_bytes", "_fetch_update_blob") and c == "_SSL_CTX"], [])
     check("其余五处仍是 _SSL_CTX", lenient,
           ["_check_logo", "_epg_fetch", "_grab", "_open", "one"])
     check("每个 urlopen 都显式写了 context（没有默认裸连）",
@@ -759,6 +763,26 @@ def main():
     check("关死源的迁移钉在 disk_ver < 8，不随版本号重跑",
           'if disk_ver < 8: dead = [k for k in ("kelvin", "epg_hk", "epg_tw", "epg_mo")'
           in re.sub(r"\s+", " ", msrc), True)
+
+    # ---------- 2026-11-02 升级通道：清单地址 → 镜像 → 原地址 ----------
+    # 起因：直连 GitHub 下载 13 MB 的包只有约 35 KB/s，客户端 180 秒超时后整轮失败。
+    sm = ns["_strip_mirror"]
+    uu = ns["_update_urls"]
+    GH = "https://github.com/kele551/LiveIPTV/releases/download/v1.5.1/LiveIPTV.exe"
+    check("镜像前缀能剥回原地址", sm("https://gh-proxy.com/" + GH), GH)
+    check("本来就不是镜像的地址不动它", sm(GH), GH)
+    u1 = uu({"url": GH})
+    check("原地址排第一", u1[0], GH)
+    check("然后是两个镜像", [x for x in u1[1:3]],
+          ["https://gh-proxy.com/" + GH, "https://ghfast.top/" + GH])
+    check("原地址不重复排一次", u1.count(GH), 1)
+    u2 = uu({"url": "https://gh-proxy.com/" + GH})
+    check("清单已经指向镜像时也要能回退到原地址", u2[-1], GH)
+    check("清单指向镜像时按镜像→另一个镜像→原地址排", len(u2), 3)
+    check("不是 GitHub 发行版的地址就只试它自己",
+          uu({"url": "https://example.com/x/LiveIPTV.exe"}),
+          ["https://example.com/x/LiveIPTV.exe"])
+    check("没有地址时返回空(交给上层报错)", uu({"url": ""}), [])
 
     print("-" * 70)
     if fails:

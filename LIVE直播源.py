@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.5.0  —— 本机直播源整理与控制台
+LIVE直播源 v1.5.1  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -72,7 +72,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
@@ -7426,6 +7426,63 @@ def _spawn_replacer(new_exe):
         return False
 
 
+# 升级包的公共镜像前缀（与列表抓取那份 MIRRORS 分开：这里是"下载整包"的场景）
+UPDATE_MIRRORS = ["https://gh-proxy.com/", "https://ghfast.top/"]
+
+
+def _strip_mirror(url):
+    """https://gh-proxy.com/https://github.com/... → https://github.com/..."""
+    for m in UPDATE_MIRRORS:
+        if url.startswith(m):
+            return url[len(m):]
+    return url
+
+
+def _update_urls(info):
+    """该试的下载地址（去重、按优先级）：清单里的地址 → 两个镜像前缀 → 原始地址。"""
+    out = []
+
+    def add(u):
+        u = (u or "").strip()
+        if u and u not in out:
+            out.append(u)
+
+    first = str(info.get("url") or "")
+    add(first)
+    base = _strip_mirror(first)
+    if base.startswith("https://github.com/"):
+        for m in UPDATE_MIRRORS:
+            add(m + base)
+        add(base)
+    return out
+
+
+def _fetch_update_blob(url, want_size=0, timeout=30, deadline=15 * 60):
+    """分块下载升级包：边读边记进度，整轮有总时限；卡住就抛异常，交给下一个地址。
+
+    2026-11-02 实测：这台机器直连 GitHub 的发行版资产只有 **≈35 KB/s**，13 MB 的包要六分钟以上，
+    中途一卡整轮就废（日志里是 "The read operation timed out"）。所以既不靠单次大 read，
+    也不死等一个地址 —— 换镜像重来比"等它自己恢复"可靠得多。"""
+    started = time.time()
+    buf = bytearray()
+    next_mark = 4 * 1024 * 1024
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA),
+                                timeout=timeout, context=_SSL_STRICT) as r:
+        while True:
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if time.time() - started > deadline:
+                raise ValueError("下载超过 %d 秒还没完" % deadline)
+            if len(buf) >= next_mark:
+                log("  已下载 %.1f MB" % (len(buf) / 1048576.0))
+                next_mark += 4 * 1024 * 1024
+            if want_size and len(buf) > want_size + 1024 * 1024:
+                raise ValueError("体积已超过清单标注 %d 字节" % want_size)
+    return bytes(buf)
+
+
 def apply_self_update(info, args):
     """下载新版本。返回 True/字典表示已处理；单文件打包下无法可靠原地替换，改为下载到数据目录并提示手动替换。"""
     url = info.get("url")
@@ -7436,22 +7493,30 @@ def apply_self_update(info, args):
     tmp = None
     try:
         log("开始下载新版本 %s …" % info.get("version"))
-        # 替换本程序的那一份字节: 严格 TLS(见 _SSL_STRICT 注释), 与 _fetch_bytes 同一口径。
-        with urllib.request.urlopen(urllib.request.Request(url, headers=UA),
-                                    timeout=180, context=_SSL_STRICT) as r:
-            data = r.read()
-        if len(data) < 1024 * 100:
-            raise ValueError("下载文件过小(<100KB)，疑似无效")
-        sha = (info.get("sha256") or "").lower()
-        if sha:
-            import hashlib
-            got = hashlib.sha256(data).hexdigest()
-            if got != sha:
-                raise ValueError("下载文件 sha256 不符(升级包损坏或被替换)，已放弃")
-            log("升级包 sha256 校验通过")
-        size = int(info.get("size") or 0)
-        if size and abs(len(data) - size) > 1024:
-            raise ValueError("下载文件大小与升级源不符，已放弃")
+        data = None
+        last_err = None
+        for u in _update_urls(info):
+            try:
+                log("  下载地址: %s" % u)
+                data = _fetch_update_blob(u, int(info.get("size") or 0))
+                if len(data) < 1024 * 100:
+                    raise ValueError("下载文件过小(<100KB)，疑似无效")
+                sha = (info.get("sha256") or "").lower()
+                if sha:
+                    import hashlib
+                    if hashlib.sha256(data).hexdigest() != sha:
+                        raise ValueError("sha256 不符(包损坏或被替换)")
+                size = int(info.get("size") or 0)
+                if size and abs(len(data) - size) > 1024:
+                    raise ValueError("大小与升级源不符")
+                log("升级包 sha256 校验通过(%d 字节)" % len(data))
+                break
+            except Exception as e:
+                last_err = e
+                data = None
+                log("  这个地址不成，换下一个: %s" % e)
+        if data is None:
+            raise ValueError("所有下载地址都失败：%s" % last_err)
         if getattr(sys, "frozen", False):
             # 单文件打包：运行中的 exe 不能被覆盖，交给一个独立小脚本等本进程退出后再换文件
             dest = BASE / "update" / ("%s_%s.exe" % (APP_NAME, info.get("version")))
