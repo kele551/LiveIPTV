@@ -784,6 +784,18 @@ def main():
           ["https://example.com/x/LiveIPTV.exe"])
     check("没有地址时返回空(交给上层报错)", uu({"url": ""}), [])
 
+    # ---------- 2026-11-02 换包方式：进程内改名换包，不再靠隐藏 PowerShell ----------
+    # 起因：靠"隐藏 PowerShell 等退出后 copy 再 Start-Process"换了两次包，exe 都换成功、
+    # 程序都自己没起来（一次没进程，一次卡在 12 MB 不动）。所以改成进程内换 + --after-update 等端口。
+    check("换包在进程内做(有 _swap_and_relaunch)", "def _swap_and_relaunch(" in msrc, True)
+    check("不再起隐藏 PowerShell 换包", "Start-Process -FilePath $dst" in msrc, False)
+    check("换完用 --after-update 拉起新进程",
+          'Popen([str(target), "--after-update"]' in msrc, True)
+    check("新进程会先等旧进程把端口放掉",
+          "if args.after_update:" in msrc and "已是最新或未配置更新地址" in msrc, True)
+    check("放回新包失败时把旧 exe 改回来", "os.rename(old, target)" in msrc, True)
+    check("启动时清理 .old/.new 残留", "_clean_stale_exe()" in msrc, True)
+
     print("-" * 70)
     if fails:
         print("有 %d 条失败: %s" % (len(fails), ", ".join(fails)))
