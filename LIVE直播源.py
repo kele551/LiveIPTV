@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.5.1  —— 本机直播源整理与控制台
+LIVE直播源 v1.5.2  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -72,7 +72,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
@@ -7385,46 +7385,9 @@ def check_self_update(cfg, force=False):
         return None
 
 
-def _ps_quote(p):
-    """PowerShell 单引号字面量（内部单引号写成两个）。"""
-    return "'" + str(p).replace("'", "''") + "'"
-
-
-def _spawn_replacer(new_exe):
-    """单文件 exe 自更新：起一个隐藏脚本，等本进程退出后替换文件并重启。
-
-    运行中的 exe 不能直接覆盖，所以必须借一个独立进程来做；
-    最多等 28 秒（40 次 × 0.7 秒），换完就启动新版本，再删掉临时文件和自己。
-    """
-    try:
-        target = Path(sys.executable).resolve()
-        script = Path(new_exe).parent / "apply_update.ps1"
-        text = (
-            "$ErrorActionPreference = 'Stop'\n"
-            "Start-Sleep -Milliseconds 1200\n"
-            "$src = %s\n"
-            "$dst = %s\n"
-            "$ok = $false\n"
-            "for ($i = 0; $i -lt 40; $i++) {\n"
-            "  try { Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; $ok = $true; break }\n"
-            "  catch { Start-Sleep -Milliseconds 700 }\n"
-            "}\n"
-            "if ($ok) { Start-Process -FilePath $dst }\n"
-            "Start-Sleep -Milliseconds 800\n"
-            "Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
-            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-        ) % (_ps_quote(new_exe), _ps_quote(target))
-        script.write_text(text, encoding="utf-8-sig")
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-WindowStyle", "Hidden", "-File", str(script)],
-            creationflags=0x08000000,   # CREATE_NO_WINDOW
-            close_fds=True)
-        return True
-    except Exception as e:
-        log("启动自动替换脚本失败: %s" % e)
-        return False
-
+# 2026-11-02：原来这里是 _ps_quote / _spawn_replacer —— 靠一个隐藏 PowerShell"等本进程退出后 copy
+# 再 Start-Process"。实测两次都是 exe 换成功、程序自己没起来（一次没进程，一次进程卡在 12 MB 不动），
+# 所以整套删掉，换成进程内的 _swap_and_relaunch（改名 → 放回 → 用 --after-update 拉起新进程）。
 
 # 升级包的公共镜像前缀（与列表抓取那份 MIRRORS 分开：这里是"下载整包"的场景）
 UPDATE_MIRRORS = ["https://gh-proxy.com/", "https://ghfast.top/"]
@@ -7483,6 +7446,74 @@ def _fetch_update_blob(url, want_size=0, timeout=30, deadline=15 * 60):
     return bytes(buf)
 
 
+def _swap_and_relaunch(target, newp, version):
+    """把已校验过的新包换成"下次启动的 exe"，再拉起它。
+
+    2026-11-02 实测（两次）：靠"隐藏 PowerShell 等本进程退出→copy→Start-Process"重启，
+    exe 换成功了但**程序自己没起来**（一次根本没进程，一次进程卡在 12 MB 不动）。
+    所以不再依赖外部脚本，改成进程内换包：
+      ① 先复制到同目录的 .new（这一步失败就什么都不动）；
+      ② 把正在运行的自己改名为 .old —— Windows 允许改运行中的 exe，不需要等退出；
+      ③ 把 .new 放回原路径，用 --after-update 拉起新进程（DETACHED_PROCESS，父进程退出不影响它）；
+      ④ 旧进程随即退出，遗留的 .old 由新进程启动时清掉（见 _clean_stale_exe）。
+    """
+    tmp = target.with_name(target.name + ".new")
+    old = target.with_name(target.name + ".old")
+    try:
+        shutil.copy2(newp, tmp)
+        if old.exists():
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        os.rename(target, old)          # 运行中的 exe 也允许改名
+        try:
+            os.rename(tmp, target)
+        except OSError:
+            os.rename(old, target)      # 放回原样，绝不把自己搞没
+            raise
+    except Exception as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        msg = ("新版本 v%s 已下载并校验通过，但自动替换失败(%s)，原程序没动；"
+               "可以关掉本程序后用 %s 手动替换。" % (version, e, newp))
+        log(msg)
+        return {"manual": True, "path": str(newp), "msg": msg}
+    try:
+        subprocess.Popen([str(target), "--after-update"], close_fds=True,
+                         creationflags=0x00000008)      # DETACHED_PROCESS
+        msg = "新版本 v%s 已替换，正在重启…" % version
+        log(msg)
+        return {"replacing": True, "msg": msg}
+    except Exception as e:
+        msg = ("新版本 v%s 已替换好，但没能自动拉起新进程(%s)；请手动打开 %s。"
+               % (version, e, target))
+        log(msg)
+        return {"manual": True, "path": str(target), "msg": msg}
+
+
+def _clean_stale_exe():
+    """清掉自更新留下的 <exe>.old / <exe>.new（旧进程刚退出时可能还被占着，重试几次）。"""
+    try:
+        p = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+        if not p:
+            return
+        for suf in (".old", ".new"):
+            f = p.with_name(p.name + suf)
+            if not f.exists():
+                continue
+            for _ in range(10):
+                try:
+                    f.unlink()
+                    break
+                except OSError:
+                    time.sleep(0.3)
+    except Exception:
+        pass
+
+
 def apply_self_update(info, args):
     """下载新版本。返回 True/字典表示已处理；单文件打包下无法可靠原地替换，改为下载到数据目录并提示手动替换。"""
     url = info.get("url")
@@ -7518,18 +7549,12 @@ def apply_self_update(info, args):
         if data is None:
             raise ValueError("所有下载地址都失败：%s" % last_err)
         if getattr(sys, "frozen", False):
-            # 单文件打包：运行中的 exe 不能被覆盖，交给一个独立小脚本等本进程退出后再换文件
+            # 单文件打包：新包先落数据目录，再在**本进程内**换（改名→放回→拉起新进程），
+            # 不再依赖"隐藏 PowerShell 等退出后 copy 再启动"那条路（实测两次都没起来）。
             dest = BASE / "update" / ("%s_%s.exe" % (APP_NAME, info.get("version")))
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
-            if _spawn_replacer(dest):
-                msg = "新版本 v%s 已校验通过，正在自动替换并重启…" % info.get("version")
-                log(msg)
-                return {"replacing": True, "msg": msg}
-            msg = ("新版本 v%s 已下载到 %s ，关闭本程序后用它替换原 exe 即可完成升级。"
-                   % (info.get("version"), dest))
-            log(msg)
-            return {"manual": True, "path": str(dest), "msg": msg}
+            return _swap_and_relaunch(Path(sys.executable).resolve(), dest, info.get("version"))
         fd, tmp = tempfile.mkstemp(suffix=".py")
         os.write(fd, data)
         os.close(fd)
@@ -7568,8 +7593,13 @@ def main():
     ap.add_argument("--no-browser", action="store_true", help="启动时不自动打开网页")
     ap.add_argument("--no-tray", action="store_true", help="不显示右下角托盘图标")
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--after-update", action="store_true",
+                    help="自更新换包后由旧进程拉起（内部用，别手输）")
     args = ap.parse_args()
     main.no_tray = bool(args.no_tray)
+
+    # 换包时旧 exe 被改名成 <exe>.old、新包先落成 <exe>.new；只有新进程起来才删得掉它们
+    _clean_stale_exe()
 
     cfg = load_cfg()
     if args.port:
@@ -7578,6 +7608,14 @@ def main():
 
     # 单实例：控制台已经开着时，先把网页调出来，不重复起进程（计划任务 --once 不受影响）
     if not args.once:
+        if args.after_update:
+            # 刚换完包：旧进程还要 1~2 秒才把端口放掉，先等它（最多 20 秒），
+            # 否则会把自己误判成"重复启动"，开个网页就退出去 —— 2026-11-02 就是这样"升完没起来"
+            for _ in range(40):
+                if not _already_running(cfg):
+                    break
+                time.sleep(0.5)
+            log("自更新换包完成，接管控制台")
         port = _already_running(cfg)
         if port:
             log("控制台已在运行: http://127.0.0.1:%d/" % port)
