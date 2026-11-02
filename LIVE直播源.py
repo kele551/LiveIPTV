@@ -105,6 +105,7 @@ LOGO_CACHE_PATH = BASE / "logos.json"
 LOG_PATH = BASE / (APP_NAME + ".log")
 FAV_PATH = BASE / "favourites.json"          # 收藏(星标)：落盘在这里，重装/换目录也还在
 EPG_CACHE_PATH = BASE / "epg_cache.json"     # EPG 节目单缓存(6 小时)，重启后不重复抓
+CEPG_CACHE_PATH = BASE / "cctv_epg_cache.json"  # 内置央视频目单缓存(45 分钟)
 
 # ---------------------------------------------------------------- 配置
 
@@ -127,7 +128,17 @@ SOURCES = [
     ("org_hk", "香港-iptv-org",  "https://iptv-org.github.io/iptv/countries/hk.m3u", True, "港澳台"),
     ("org_tw", "台湾-iptv-org",  "https://iptv-org.github.io/iptv/countries/tw.m3u", True, "港澳台"),
     ("org_mo", "澳门-iptv-org",  "https://iptv-org.github.io/iptv/countries/mo.m3u", True, "港澳台"),
-    ("yang",   "国内聚合·YanG(GitHub)", "https://raw.githubusercontent.com/YanG-1989/m3u/main/Gather.m3u", True, "国内"),
+    # 2026-11-02 全量实测(主清单→变体→第一个媒体分片，只算真能出画面的)：
+    # YanG 这条 123 条命中 0 —— 42 条咪咕网关换 7 种 UA 全 403(要的是签名 URL)，
+    # 剩下 81 条是 ttvb 代理的 bilibili/huya 直播间，全 404，本来也不是电视台。
+    # 每轮白探 123 条纯属拖慢探测，所以默认关掉；想试的人在"设置→数据源"里打开。
+    ("yang",   "国内聚合·YanG(GitHub,建议关)", "https://raw.githubusercontent.com/YanG-1989/m3u/main/Gather.m3u", False, "国内"),
+    # 2026-11-02 新接的两条，是当天实测里命中最高的两个新面孔：
+    #   akiralereal IPTV.m3u  32 条 → 28/32 = 88%（含民视高清、TVBS亚洲、湖南卫视4K、浙江卫视4K）
+    #   best-fan  cn_all.m3u8 142 条 → 抽样 22/45 = 49%（每天自动检测，比 CCSH 全量/Guovin/ChinaIPTV 都高）
+    ("akira",  "国内聚合·akiralereal(GitHub)", "https://raw.githubusercontent.com/akiralereal/iptv/main/IPTV.m3u", True, "国内"),
+    # best-fan 这条 2026-11-02 实测 raw.githubusercontent 连不上、jsdelivr 200，所以主地址直接走 jsdelivr
+    ("bestfan","国内聚合·best-fan(GitHub)",     "https://cdn.jsdelivr.net/gh/best-fan/iptv-sources@main/cn_all.m3u8", True, "国内"),
     # 以下三个 2026-10-19 实测全部不可达(0/135 可播)，默认关闭，需要时可在“设置→数据源”打开：
     # Kelvin 的 HK.m3u 38 条全超时；epg.pw 的三份列表指向 stream1.freetv.fun，本网络连不上。
     ("kelvin", "港澳台-Kelvin",  "https://raw.githubusercontent.com/Kelvin0755/iptv-m3u-maker/master/HK.m3u", False, "港澳台"),
@@ -236,6 +247,17 @@ SOURCE_FALLBACKS = {
         "https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u",
         "https://gcore.jsdelivr.net/gh/Guovin/iptv-api@gd/output/result.m3u",
     ],
+    # 2026-11-02 新接的两条：GitHub raw 在这台机器上时通时不通，jsdelivr 三条边缘都实测 200
+    "akira": [
+        "https://cdn.jsdelivr.net/gh/akiralereal/iptv@main/IPTV.m3u",
+        "https://fastly.jsdelivr.net/gh/akiralereal/iptv@main/IPTV.m3u",
+        "https://gcore.jsdelivr.net/gh/akiralereal/iptv@main/IPTV.m3u",
+    ],
+    "bestfan": [
+        "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all.m3u8",
+        "https://fastly.jsdelivr.net/gh/best-fan/iptv-sources@main/cn_all.m3u8",
+        "https://gcore.jsdelivr.net/gh/best-fan/iptv-sources@main/cn_all.m3u8",
+    ],
 }
 # 国际国家源(iptv-org.github.io 无镜像代理，备选走 raw streams + jsdelivr；分类源无 raw 等价路径不设备选)
 for _cc, _zh in ORG_COUNTRIES:
@@ -245,7 +267,7 @@ for _cc, _zh in ORG_COUNTRIES:
             "https://fastly.jsdelivr.net/gh/iptv-org/iptv@master/streams/%s.m3u" % _cc,
         ]
 
-CFG_VER = 8                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
+CFG_VER = 9                    # 当前配置结构版本；load_cfg() 里比"盘上的旧版本"做一次性迁移
 
 def _desktop_dir():
     """真正的桌面目录。
@@ -319,7 +341,8 @@ DEFAULT_CFG = {
     "only_tv": True,           # 只保留"电视台"频道：用 CCSH 人工整理的频道名单做白名单
     "verify_timeout": 4,       # 单源探测超时(秒)
     "concurrency": 256,        # 并发探测数(地址已去重，256 路大部分时间在等 IO)
-    "epg_url": "",             # EPG 节目单地址(可选)
+    "epg_url": "",             # EPG 节目单地址(可选，填了优先用它)
+    "cctv_epg": True,          # 内置央视频目单(央视+主要卫视，免配置自动更新)
     "output_path": str(_desktop_dir() / (APP_NAME + ".m3u")),   # 直播源自动更新保存位置
     # 2026-10-24 用户反馈：不想每次跑完更新就往桌面写一个 M3U。默认关；
     # 想恢复"更新完自动导出"，把这项改成 True 即可（手动「保存 M3U」不受影响）。
@@ -332,7 +355,7 @@ DEFAULT_CFG = {
     "tray": True,              # 显示右下角托盘图标
     "update_auto": False,      # 发现新版本是否自动下载替换并重启
     "update_check_hours": 24,  # 程序自更新检查间隔(小时)
-    "cfg_ver": 8,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
+    "cfg_ver": 9,              # 配置结构版本(升级时做一次性迁移；见 CFG_VER)
     "sources": {k: on for k, _, _, on, _ in SOURCES},
 }
 
@@ -437,20 +460,26 @@ def load_cfg():
     except Exception:
         disk_ver = 0
     if disk_ver < CFG_VER:
-        dead = [k for k in ("kelvin", "epg_hk", "epg_tw", "epg_mo") if cfg["sources"].get(k)]
-        for k in dead:
-            cfg["sources"][k] = False
-        if dead:
-            log("配置升级：已关闭实测不可达的 %d 个源(%s)，可在设置→数据源里重新打开"
-                % (len(dead), "、".join(dead)))
-        if int(cfg.get("concurrency") or 0) <= 160:
-            cfg["concurrency"] = 256  # v1.3 地址去重后可以开更多并发，明显更快
-        if cfg["sources"].get("ccsh_plat"):
-            cfg["sources"]["ccsh_plat"] = False  # 里面是网络直播间清单，不是电视台
-        if int(cfg.get("urls_per_channel") or 0) > 1:
-            cfg["urls_per_channel"] = 1  # 每条线路单独一行会变成播放器里的"无名 url"，默认只写一条
-            log("配置升级：每个频道只写 1 条线路(多条会让播放列表变乱，需要时在设置里调)")
-            log("配置升级：已关闭「CCSH·平台源」(它是直播间清单，不是电视台)")
+        # 2026-11-02：这一段以前挂在「版本号一变就重跑」上，可它改的是**用户自己的勾选**。
+        # 今天只把 CFG_VER 从 8 提到 9（为了关 YanG），就顺手把用户后来自己勾回来的
+        # kelvin / epg_hk / epg_tw / epg_mo 又关了 —— 日志写的是"关一次"，实际关了第二次。
+        # 它们的本意就是"v1.3 那一次"，现在钉在 disk_ver < 8：老配置照样被修一次，
+        # 升到 8 及以后的配置不再被版本号连带波及。
+        if disk_ver < 8:
+            dead = [k for k in ("kelvin", "epg_hk", "epg_tw", "epg_mo") if cfg["sources"].get(k)]
+            for k in dead:
+                cfg["sources"][k] = False
+            if dead:
+                log("配置升级：已关闭实测不可达的 %d 个源(%s)，可在设置→数据源里重新打开"
+                    % (len(dead), "、".join(dead)))
+            if int(cfg.get("concurrency") or 0) <= 160:
+                cfg["concurrency"] = 256  # v1.3 地址去重后可以开更多并发，明显更快
+            if cfg["sources"].get("ccsh_plat"):
+                cfg["sources"]["ccsh_plat"] = False  # 里面是网络直播间清单，不是电视台
+            if int(cfg.get("urls_per_channel") or 0) > 1:
+                cfg["urls_per_channel"] = 1  # 每条线路单独一行会变成播放器里的"无名 url"，默认只写一条
+                log("配置升级：每个频道只写 1 条线路(多条会让播放列表变乱，需要时在设置里调)")
+                log("配置升级：已关闭「CCSH·平台源」(它是直播间清单，不是电视台)")
         # 保存位置如果落在盘根(比如 F:\)，用户其实是想存桌面，一起搬过去
         try:
             op = Path(str(cfg.get("output_path") or "").strip() or ".")
@@ -462,6 +491,12 @@ def load_cfg():
         if disk_ver < 6 and not str(cfg.get("update_url") or "").strip():
             cfg["update_url"] = "https://raw.githubusercontent.com/kele551/LiveIPTV/main/version.json"
             log("配置升级：升级源地址已指向 GitHub 发布页")
+        # v1.4.4：YanG·Gather 全量实测 0/123 能出画面(咪咕要签名 URL、ttvb 代理已 404)，
+        # 老配置里它是开启的会一直白探 123 条，这里关一次。之后用户自己勾就算开启也尊重。
+        if disk_ver < 9 and cfg["sources"].get("yang"):
+            cfg["sources"]["yang"] = False
+            log("配置升级：已关闭「国内聚合·YanG」(2026-11-02 全量实测 123 条 0 条能出画面，"
+                "需要时在设置→数据源里打开)")
     cfg["cfg_ver"] = CFG_VER
     return cfg
 
@@ -514,8 +549,8 @@ def parse_m3u(text, tag):
 # ---------------------------------------------------------------- 分类与画质
 
 MO_KW = re.compile(r"(澳门|澳亚|澳视|tdm|lotus|莲花|澳广视|macau)", re.I)
-TW_KW = re.compile(r"(台湾|台视|中视|华视|民视|公视|三立|东森|中天|tvbs|年代|非凡|高点|狼谷|客家|原住|大爱|momo|卫视电影|taiwan|\bcts\b|\bttv\b|\bftv\b|\bset\b)", re.I)
-HK_KW = re.compile(r"(香港|港台|翡翠|明珠|tvb|viu|rthk|hoy|开电视|有线|now新闻|now财经|凤凰|星空|美亚|天映|龙祥|国际财经|亚旅|\bhkc\b|\batv\b|hongkong)", re.I)
+TW_KW = re.compile(r"(台湾|台视|中视|华视|民视|公视|三立|东森|中天|tvbs|年代|非凡|高点|狼谷|客家|原住|大爱|momo|卫视电影|纬来|taiwan|\bcts\b|\bttv\b|\bftv\b|\bset\b)", re.I)
+HK_KW = re.compile(r"(香港|港台|翡翠|明珠|tvb|viu|rthk|hoy|开电视|有线|now新闻|now财经|凤凰|星空|美亚|天映|龙祥|国际财经|亚旅|耀才|\bhkc\b|\batv\b|hongkong)", re.I)
 CCTV_KW = re.compile(r"(cctv|央视|中央|风云|奥林匹克|国防|军事|农业|科教|法制|社会与法|中文国际|戏曲|音乐频道|电影频道|纪录频道|少儿频道|足球频道|世界地理|怀旧剧场|第一剧场|高尔夫|央视台球|兵器科技|卫生健康|女性时尚|文化精品)", re.I)
 # 只认"一定是央视"的强特征；弱特征(科教/法制/风云/剧场…)在聚合源里常是地方台，
 # 比如"邯郸科教""伊犁经济法制"——光靠 CCTV_KW 会把它们塞进央视分组
@@ -558,7 +593,8 @@ def classify(name, tag):
         return "地方台"
     if CCTV_KW.search(n):
         if (CCTV_STRONG.search(n) or name in CCTV_PAID
-                or tag not in ("cn_org", "yang", "ccsh_live", "guovin", "cinauto", "ccsh_plat")):
+                or tag not in ("cn_org", "yang", "akira", "bestfan",
+                               "ccsh_live", "guovin", "cinauto", "ccsh_plat")):
             return "央视"
         # 聚合源里靠"科教/法制/风云"这类弱词命中的，多半是地方台，往下走
     if "卫视" in name:
@@ -570,7 +606,11 @@ def classify(name, tag):
     if re.search(r"(少儿|卡通|动漫|金鹰|亲子|baby)", n):
         return "少儿"
     # 国内频道主体：来自 iptv-org 中国 / YanG / CCSH / Guovin 聚合，未匹配以上的归为地方台
-    if tag in ("cn_org", "yang", "ccsh_plat", "ccsh_live", "guovin", "cinauto", "curated"):
+    # akira/bestfan 也收进这张表：akira 里 12 条海外体育(Red Bull/NHL/UFC)和 5 条县市台
+    # 落"地方台"= 默认被 hide_local 挡掉，首页不因为这些新源变脏；
+    # 真正想要的民视/台视/公视/TVBS 早被 TW_KW 拦到"台湾"分组，不会跟着掉进地方台。
+    if tag in ("cn_org", "yang", "ccsh_plat", "ccsh_live", "guovin", "cinauto",
+               "akira", "bestfan", "curated"):
         return "地方台"
     # 国际频道：按源标签映射国家(地区)中文名
     if tag in COUNTRY_OF_TAG:
@@ -1616,7 +1656,7 @@ REGION_TAG = {
     "香港": {"kelvin", "org_hk", "epg_hk"},
     "澳门": {"org_mo", "epg_mo"},
     "台湾": {"org_tw", "epg_tw"},
-    "国内": {"cn_org", "yang"},
+    "国内": {"cn_org", "yang", "akira", "bestfan"},
 }
 
 
@@ -1629,6 +1669,38 @@ REGION_TAG = {
 CLARITY_HEIGHT = 1000          # ≥1000 像素算高清分辨率(1080P 及以上)
 CLARITY_MBPS = 2.0             # 用户给的码率门槛：2 Mbps
 SMOOTH_KBPS = 400.0            # 用户给的流畅门槛：400 KB/s(≈3.2 Mbps)
+
+# 「码率不足」按分辨率分档（2026-11-02 借 Guovin/iptv-api 的 resolution_speed_map 思路，实现自己写）。
+# 原来全场景只有一条 2 Mbps 线，两头都判错：
+#   ① 720P/1.5M、480P/0.9M 这种本来正常的源被挂上"码率不足"，面板里一片假问题；
+#   ② 4K/3M 这种严重欠码的虚标源反而一句"4K超清"夸过去了。
+# 档位以用户给的 1080P=2 Mbps 为锚，按像素数折算：4K 是 1080P 的 4 倍像素→8M，
+# 720P≈0.44 倍→1.2M，480P≈0.2 倍→0.6M。分辨率没测到(0)时仍按 2 Mbps，不放宽。
+BIT_FLOOR = ((1800, 8.0), (1000, 2.0), (620, 1.2), (1, 0.6))
+
+
+def bit_floor(res_h):
+    """这一路分辨率对应的码率及格线(Mbps)。分辨率未知时退回用户那条 2 Mbps。"""
+    try:
+        rh = int(res_h or 0)
+    except Exception:
+        rh = 0
+    if rh <= 0:
+        return CLARITY_MBPS
+    for cut, floor in BIT_FLOOR:
+        if rh >= cut:
+            return floor
+    return BIT_FLOOR[-1][1]
+
+
+def low_bitrate(mbps, res_h):
+    """是否"码率不足"：测到码率、且低于当前分辨率档位的及格线。"""
+    try:
+        mb = float(mbps or 0)
+    except Exception:
+        mb = 0.0
+    return 0 < mb < bit_floor(res_h)
+
 MB_TIERS = ((9.0, 4, "超清"), (5.0, 3, "高清"), (2.5, 2, "标准"), (1.0, 1, "一般"))
 RES_LEVELS = ((2000, 4.0, "4K"), (1000, 3.0, "1080P"), (620, 2.0, "720P"), (400, 1.0, "480P"))
 # 央视频道的官方说法（台标上印的那几个字），频道名统一按这个写
@@ -1817,8 +1889,9 @@ def quality_label(mbps, res_h):
         mb = float(mbps or 0)
     except Exception:
         mb = 0.0
-    if rh >= 1800 and mb >= CLARITY_MBPS:
-        return "4K超清"
+    if rh >= 1800:
+        # 4K 档单独判：像素是 1080P 的 4 倍，只给 2~3 Mbps 就是欠码，不能叫"4K超清"
+        return "4K超清" if mb >= bit_floor(rh) else ("低码率" if mb > 0 else "未测")
     if rh >= CLARITY_HEIGHT and mb >= CLARITY_MBPS:
         return "高清"
     if rh >= CLARITY_HEIGHT and mb > 0:
@@ -1857,7 +1930,7 @@ def _src_quality(s, ch):
     rh = s.get("res") or 0
     rs = res_level(rh)
     if mb > 0:
-        adequate = min(1.0, mb / CLARITY_MBPS)
+        adequate = min(1.0, mb / bit_floor(rh))   # 按分辨率档位算及格度：720P 拿到 1.2M 就算满档
         bonus = min(1.0, mb / 10.0) * 5.0
         base = rs if rs is not None else 2.0
         return round(base * 10 * (0.55 + 0.45 * adequate) + bonus, 2)
@@ -2611,7 +2684,27 @@ _TRAD_S2T = {
     "号": "號", "毕": "畢", "兴": "興", "举": "舉", "办": "辦", "际": "際", "陆": "陸",
     "岛": "島", "峡": "峽", "湾": "灣", "视": "視", "众": "眾", "亿": "億", "价": "價",
     "传": "傳", "侨": "僑", "俩": "倆", "仓": "倉", "伞": "傘", "伦": "倫", "伟": "偉",
+    # 2026-11-02 补的 26 字：拿 iptv-org 数据库里 CN/HK/TW/MO 全部台名(1,859 个写法)
+    # 和内置公开表的台名逐字对过繁简，这些是原表漏掉、且不存在"一字对多个简体"歧义的。
+    # 对照表是编目时用第三方 zhconv 生成后手抄进来的，程序运行不依赖它。
+    "创": "創", "国": "國", "报": "報", "娱": "娛", "爱": "愛", "会": "會", "极": "極",
+    "欧": "歐", "欢": "歡", "为": "為", "无": "無", "环": "環", "络": "絡",
+    "艳": "艷", "冲": "衝", "制": "製", "览": "覽", "购": "購", "运": "運", "选": "選",
+    "镜": "鏡", "开": "開", "电": "電", "频": "頻", "惊": "驚",
 }
+
+# 繁体 -> 简体：上面那张表反过来用。节目单里的港台台名几乎都是繁体
+# （"民視新聞台""鳳凰衛視香港台"），而面板上的卡片是简体写法，
+# _epg_norm 不做这一步就永远对不上 —— 台名差一个繁简，节目单就白显示 —。
+# 写成推导式而不是 for 循环，是为了让 tests/test_logic.py 能把这张表一起摘出来测。
+_T2S = {t: s for s, t in _TRAD_S2T.items()}
+
+
+def _simplify(s):
+    """繁体名 -> 简体名（表里没有的字原样保留）。"""
+    if not s:
+        return s
+    return "".join(_T2S.get(c, c) for c in s)
 
 
 def _trad(s):
@@ -2619,6 +2712,34 @@ def _trad(s):
     if not s:
         return s
     return "".join(_TRAD_S2T.get(c, c) for c in s)
+
+
+# 台标候选要剥掉的画质装饰词：图库按"台"收图，源里却常写"民视高清/湖南卫视4K超清"。
+# 只认带明确后缀的写法(4K/HD/1080P…)，不收裸数字 —— 否则"港台电视31"会被剥成"港台电视3"。
+_QUAL_DEC = re.compile(r"(?i)(超高清|超清|高清|标清|蓝光|原画|流畅|fhd|uhd|hd|sd|4k|8k|"
+                       r"2160p|1080p|720p|480p|576p)\s*$")
+
+
+def _quality_stripped(base):
+    """反复剥掉结尾的画质装饰词，返回剥出来的各级写法(不含自己)。最多剥两层。"""
+    out, cur = [], (base or "").strip()
+    for _ in range(2):
+        nxt = _QUAL_DEC.sub("", cur).strip()
+        if not nxt or nxt == cur:
+            break
+        out.append(nxt)
+        cur = nxt
+    return out
+
+
+def _uniq_nonempty(items):
+    """按出现顺序去空去重（台标候选列表用，免得同一写法反复查盘）。"""
+    seen, out = set(), []
+    for it in items:
+        if it and it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
 
 
 def _logo_cands(name):
@@ -2645,6 +2766,13 @@ def _logo_cands(name):
     for v in (n2, n3, n4):
         if v and v not in cands:
             cands.append(v)
+    # 画质装饰词单独剥一层：图库里收的是"民视/台视/公视"，而源里写的是"民视高清"。
+    # 以前 n2 那条只处理结尾的 hd/4k(要求以 h/H 开头)，"高清/超清/标清"这种中文写法剥不掉，
+    # 于是 2026-11-02 新接的 akiralereal 里民视高清/台视高清/公视高清三张卡片台标全空。
+    for b in list(cands):
+        for q in _quality_stripped(b):
+            if q and q not in cands:
+                cands.append(q)
     # 繁体写法再补一轮：港台频道在台标站/图库里基本只收繁体名（亚洲剧 -> 亞洲劇台）
     for b in list(cands):
         t = _trad(b)
@@ -2676,13 +2804,11 @@ def _resolve_logo_local(name):
             if p:
                 return "https://raw.githubusercontent.com/%s/main/tv/%s.png" % (host, quote(qn))
     # 冷门台：别的中文图库单独补的几张，放 logos_lib/other/<频道名>.png
-    for v in [n] + cands[:1]:
-        for qn in (v, n2, n3, n4):
-            if not qn:
-                continue
-            p = _lib_file("other", "%s.png" % qn)
-            if p:
-                return "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/%s.png" % quote(qn)
+    # 这里要遍历全部候选(含剥掉"高清/4K"的写法)，只看原名的话"民视高清"就对不上 other/民视.png
+    for qn in _uniq_nonempty([n] + cands + [n2, n3, n4]):
+        p = _lib_file("other", "%s.png" % qn)
+        if p:
+            return "https://cdn.jsdelivr.net/gh/CCSH/IPTV@main/logo/%s.png" % quote(qn)
     # 另一个图库(英文命名)再试一遍
     for v in cands:
         for qn in (v, v.upper(), v.lower()):
@@ -4086,8 +4212,10 @@ def _fav_keys_of(channels):
 
 # ---------------------------------------------------------------- EPG(正在播出)
 # 设计要点：
-#   * 抓取/解析只在后台线程(epg_loop)里做，/api/epg 永远只读内存缓存 —— 不拖慢首屏；
-#   * 缓存 6 小时并落盘 epg_cache.json，重启后 6 小时内不重复抓；
+#   * 抓取/解析只在后台线程(epg_loop / cctv_epg_loop / bepg_loop)里做，/api/epg 永远只读内存缓存 —— 不拖慢首屏；
+#   * 三份来源，查询顺序见 epg_now：用户自己填的 XMLTV(epg_url) >
+#     内置央视官方(给了具体名字的) > 内置第三方节目表(补官方只写"电视剧"的) > 官方那条大类词；
+#   * 缓存落盘(epg_cache.json / cctv_epg_cache.json / builtin_epg_cache.json)，重启后没到期就不重复抓；
 #   * 抓不到/解析失败一律静默降级：接口 ok=false，界面显示「—」，其它功能照常。
 EPG_TTL = 6 * 3600              # 节目单缓存 6 小时
 EPG_RETRY = 30 * 60             # 抓失败后 30 分钟再试（别一直撞）
@@ -4105,12 +4233,34 @@ _EPG_NOISE = re.compile(r"(?i)(hd|fhd|uhd|高清|超清|蓝光|标清|流畅)")
 
 
 def _epg_norm(name):
-    """EPG 台名归一：只用来"对名字"，跟列表里显示什么名字无关。"""
+    """EPG 台名归一：只用来"对名字"，跟列表里显示什么名字无关。
+    第一步先繁转简：节目单里港台台名基本都是繁体("民視新聞台")，
+    而卡片名是简体("民视新闻台")，不转就直接判成"这个台没有节目单"了。"""
     n = unicodedata.normalize("NFKC", str(name or "")).lower()
+    n = _simplify(n)
     n = _EPG_NOISE.sub("", n)
     n = re.sub(r"[\s·・\-_/()（）\[\]【】:：]+", "", n)
     n = n.rstrip("台") or n
     return CHANNEL_ALIAS.get(n, n)
+
+
+def _epg_name_keys(name):
+    """一个"频道名"该拿去查节目单的哪些键：归一后的原名，外加央视短号(CCTV-1 / CCTV-5+ / CCTV16)。
+    登记侧(cctv_epg_keys)和查询侧要用同一套写法，否则会出现
+    "官方台名登记了 CCTV-1 综合，可列表里那台叫 CCTV-1综合频道 就查不到" —— 界面白显示一个 —。
+    抠短号时"+"必须跟着走(CCTV-5+ 不能顺手把 cctv5 抢走)，"K"也必须挡住：
+    CCTV-4K 里的 4 不是 CCTV-4，让它的短号进表就等于把中文国际的节目单挂到 4K 台上。"""
+    out = []
+    raw = str(name or "").strip()
+    n = _epg_norm(raw)
+    if n and n not in out:
+        out.append(n)
+    m = re.match(r"(?i)^\s*cctv\s*[-–—]?(\d{1,2})(\+?)(?![kK])", raw)
+    if m:
+        k = _epg_norm("cctv" + m.group(1) + m.group(2))
+        if k and k not in out:
+            out.append(k)
+    return out
 
 
 def _epg_ts(s):
@@ -4289,21 +4439,21 @@ def epg_loop(cfg):
         time.sleep(60)
 
 
-def epg_now(ch, now=None):
-    """一个频道"正在播出"的节目；没有就返回 None(界面显示 —)。"""
-    with _EPG_LOCK:
-        if not _EPG["ok"]:
-            return None
-        progs = _EPG["progs"]
-        by_name = _EPG["by_name"]
+def _epg_pick(progs, by_name, ch, now, src):
+    """在一份 (节目表, 台名索引) 里找一个频道"此刻在播什么"；找不到返回 None。
+    纯查询，不碰锁也不碰全局，方便单测直接喂假数据（也是内置/自定义两份缓存能共用的前提）。"""
     if not progs:
         return None
-    now = time.time() if now is None else now
     cid = ""
+    tried = set()
     for nm in (ch.get("name") or "", ch.get("aka") or ""):
-        if not nm:
-            continue
-        cid = by_name.get(_epg_norm(nm), "")
+        for k in _epg_name_keys(nm):
+            if k in tried:
+                continue
+            tried.add(k)
+            cid = by_name.get(k, "")
+            if cid:
+                break
         if cid:
             break
     if not cid:
@@ -4314,8 +4464,526 @@ def epg_now(ch, now=None):
         if now < sp:
             dur = max(1, sp - st)
             return {"t": title, "s": _epg_hhmm(st), "e": _epg_hhmm(sp),
-                    "p": round((now - st) * 100.0 / dur, 1), "s0": int(st), "e0": int(sp)}
+                    "p": round((now - st) * 100.0 / dur, 1), "s0": int(st), "e0": int(sp),
+                    "src": src}
     return None
+
+
+def epg_now(ch, now=None):
+    """一个频道"正在播出"的节目；没有就返回 None(界面显示 —)。
+    顺序（2026-11-02 定，理由见上面两段注释）：
+      1) 用户自己填的 XMLTV —— 那是他明确选的，永远优先；
+      2) 央视官方接口给了具体名字的 —— 官方最准，不动；
+      3) 内置第三方节目表 —— 专治官方只写"电视剧"这类大类词，以及官方压根没有的台；
+      4) 剩下才退回官方那条大类词（有"电视剧"也比空着强）。"""
+    now = time.time() if now is None else now
+    with _EPG_LOCK:
+        u_ok, u_progs, u_by = _EPG["ok"], _EPG["progs"], _EPG["by_name"]
+    if u_ok:
+        it = _epg_pick(u_progs, u_by, ch, now, "custom")
+        if it:
+            return it
+    with _CEPG_LOCK:
+        b_progs, b_by = _CEPG["progs"], _CEPG["by_name"]
+    off = _epg_pick(b_progs, b_by, ch, now, "cctv")
+    if off and not _epg_generic(off["t"]):
+        return off
+    with _BEPG_LOCK:
+        x_progs, x_by = _BEPG["progs"], _BEPG["by_name"]
+    x = _epg_pick(x_progs, x_by, ch, now, "builtin")
+    if x and _epg_useful(x["t"]):
+        return x
+    return off            # 第三方这条是占位档：宁可显示官方的"电视剧"，也不摆"请欣赏××卫视"
+
+
+# ---------------------------------------------------------------- 内置央视频目单(免配置)
+# 2026-11-02：官网直播页 tv.cctv.com/live 那批流是明文 HLS，节目单也有公开接口，于是
+# "正在播出"不再要求用户先去设置里找一个 XMLTV 地址（大多数人根本不知道去哪找）：
+#   GET https://api.cntv.cn/epg/getEpgInfoByChannelNew?c=<id,id,...>&serviceId=tvcctv&d=<YYYYMMDD>&cb=t
+#   回 JSONP：t({"data":{"cctv1":{"channelName":"CCTV-1 综合","isLive":"…","liveSt":1793582510,
+#                             "list":[{"title","startTime","endTime","showTime","length"}, ...]}}})
+# 实测(2026-11-02，本机云南 IPv4)：61 个频道一次请求、约 370KB、1.7s，今天整档 00:44–23:59 全在，
+# 免鉴权、不校验 Referer；明天(20261103)同样有。三个必须记住的脾气：
+#   * c= 里混进一个不认识的 id 会整包 `{"errcode":"1001","msg":"params error"}` —— 频道表只能放验证过的；
+#     想加台就单个请求试一遍(id 猜不出来：北京台是 btv1、东南台是 dongnan、世界地理是 shijiedili，
+#     山西/陕西/海南/兵器科技 当天试到第四轮也没有)。
+#   * 官方命名不齐：纪录片在 cctvjilu 不在 cctv9(cctv9=CCTV-News，当天 0 条)，
+#     少儿在 cctvchild，cctv14 是空表 —— 所以这几个 id 一个都不放进表里，靠 CEPG_ALIAS 认台名。
+#   * 卫视的 list.title 经常只有一个大类("电视剧"/"纪录片")，可同一份回包里的 isLive 是细的
+#     ("电视剧：问心2第17集") —— 所以此刻在播那一档用 isLive 覆盖，见 cctv_epg_live_title。
+# 抓取只在这个模块的后台线程里做，/api/epg 永远只读内存缓存；失败就把上次的缓存一直用到 next_try。
+CEPG_TTL = 45 * 60                # 节目单缓存 45 分钟(一天约 32 次 × 370KB ≈ 12MB，够新也不算吵)
+CEPG_RETRY = 10 * 60              # 抓失败后 10 分钟再试
+CEPG_ROLL = 2 * 3600              # 离今天 24:00 不到 2 小时就顺手把明天也取回来
+CEPG_URL = ("https://api.cntv.cn/epg/getEpgInfoByChannelNew"
+            "?c=%s&serviceId=tvcctv&d=%s&cb=t")
+CEPG_CHANNELS = (
+    # 央视：cctv9(新闻英语)、cctv14(空表)不要，理由见上面的命名坑
+    "cctv1", "cctv2", "cctv3", "cctv4", "cctv5", "cctv5plus", "cctv6", "cctv7", "cctv8",
+    "cctv10", "cctv11", "cctv12", "cctv13", "cctv15", "cctv16", "cctv17",
+    "cctvchild", "cctvjilu", "cctv4k", "cctv8k",
+    # 央视付费/数字频道(2026-11-02 逐个实测；写法很随性，全名/缩写混着来，别照着猜)
+    "shijiedili", "fyyy", "fyjc", "hjjc", "diyijuchang", "cctvfyzq", "taiqiu",
+    "shishang", "jingpin", "zhinan", "cctvliyuan", "gaoerfu",
+    # 主要卫视(2026-11-02 逐个实测有节目单；beijing/hainan/fujian/shanxi/shaanxi 这几个
+    # id 官方不认——北京台在 btv1、东南台在 dongnan，别退回按省名拼音猜)
+    "hunan", "zhejiang", "dongfang", "jiangsu", "shenzhen", "guangdong", "liaoning",
+    "sichuan", "chongqing", "anhui", "hubei", "shandong", "hebei", "tianjin", "jiangxi",
+    "xizang", "yunnan", "guizhou", "ningxia", "qinghai", "jilin", "guangxi",
+    "btv1", "dongnan", "henan", "gansu", "neimenggu", "bingtuan", "xiamen",
+)
+# 接口台名覆盖不到的写法，只给"对不上"的那些补；照抄列表里看到的写法就行，
+# 登记时统一过一遍 _epg_norm（以前要求手写成归一后的样子，"CCTV-4K 超高清"这种
+# 带"超清"字样的会被噪音规则削成"cctv4k高"，人写的和机器算的对不上，别名就静默失效）。
+# 付费频道官方一律带"CCTV"前缀("CCTV世界地理")，而列表里常叫裸名"世界地理" —— 裸名都要登记一份。
+# 4K/8K 现在有真 id(cctv4k/cctv8k)，不再挂到 CCTV-16 名下。
+CEPG_ALIAS = {
+    "cctv4": ("CCTV-4 中文国际", "CCTV-4亚洲", "CCTV-4欧洲", "CCTV-4美洲"),
+    "cctv5plus": ("CCTV-5+ 体育赛事", "CCTV体育赛事", "CCTV5+体育赛事"),
+    "cctvchild": ("CCTV-14 少儿", "CCTV-14", "CCTV少儿", "少儿频道"),
+    "cctvjilu": ("CCTV-9 纪录", "CCTV-9", "CCTV纪录", "纪录频道"),
+    "cctv15": ("CCTV-15 音乐", "CCTV音乐"),
+    "cctv10": ("CCTV-10 科教", "CCTV科教"),
+    "cctv7": ("CCTV-7 国防军事", "CCTV国防军事"),
+    "cctv17": ("CCTV-17 农业农村", "CCTV农业农村"),
+    "shijiedili": ("世界地理", "CCTV世界地理"),
+    "fyyy": ("风云音乐", "CCTV风云音乐"),
+    "fyjc": ("风云剧场", "CCTV风云剧场"),
+    "hjjc": ("怀旧剧场", "CCTV怀旧剧场"),
+    "diyijuchang": ("第一剧场", "CCTV第一剧场"),
+    "cctvfyzq": ("风云足球", "CCTV风云足球"),
+    "taiqiu": ("央视台球", "台球", "CCTV台球"),
+    "shishang": ("女性时尚", "CCTV女性时尚"),
+    "jingpin": ("央视文化精品", "文化精品"),
+    "zhinan": ("电视指南", "CCTV电视指南"),
+    "cctvliyuan": ("CCTV梨园", "央视梨园", "梨园频道"),
+    "gaoerfu": ("高尔夫网球", "CCTV高尔夫", "CCTV高尔夫网球"),
+    "cctv4k": ("CCTV-4K 超高清", "4K超高清", "CCTV4K"),
+    "cctv8k": ("CCTV-8K 超高清", "8K超高清"),
+}
+
+_CEPG_LOCK = threading.Lock()
+_CEPG = {
+    "ok": False, "msg": "内置节目单还没开始抓", "fetched": 0.0, "next_try": 0.0,
+    "progs": {},      # 接口频道 id -> [(开始ts, 结束ts, 节目名), ...]（今天+明天，已升序）
+    "by_name": {},    # 归一化台名 -> id
+    "names": {},      # id -> 官方台名（日志和设置里那句状态要用）
+    "count": 0,
+    "days": "",       # 这份缓存取的是哪几天，如 "20261102" / "20261102+20261103"
+}
+
+
+def cctv_epg_day(now_ts, offset=0):
+    """时间戳 -> 接口要的 YYYYMMDD；offset=1 就是明天。"""
+    try:
+        return datetime.fromtimestamp(now_ts + offset * 86400).strftime("%Y%m%d")
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
+def cctv_epg_days(now_ts):
+    """这一轮该取哪几天：默认只有今天；快到点子了连明天一起取，
+    这样跨过 00:00 时不用等下一轮抓取就能看到后面的节目。返回 "今天" 或 "今天+明天"。"""
+    today = cctv_epg_day(now_ts)
+    if not today:
+        return ""
+    try:
+        midnight = datetime.fromtimestamp(now_ts).replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp()
+        left = midnight + 86400 - now_ts
+    except (ValueError, OSError, OverflowError):
+        left = 86400.0
+    if 0 <= left <= CEPG_ROLL:
+        tmr = cctv_epg_day(now_ts, 1)
+        if tmr:
+            return today + "+" + tmr
+    return today
+
+
+def cctv_epg_strip_jsonp(text):
+    """接口回的是 JSONP `t({...});` —— 取第一个 '(' 到最后一个 ')' 中间那段。
+    不是 JSONP(直接给 JSON)也照样能过。"""
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    i, j = t.find("("), t.rfind(")")
+    if 0 < i < j:
+        return t[i + 1:j]
+    return t
+
+
+def cctv_epg_keys(channel_name, cid):
+    """一个频道该登记哪些"对名字"的键。官方 channelName 写法不统一
+    （"CCTV-1 综合" / "CCTV-4 (亚洲)" / "CCTV-16奥林匹克" / "CCTV-5+ 体育赛事"），
+    所以台名本身、接口 id、以及从台名里抠出来的短号(CCTV-16)各登记一份，全都过 _epg_norm。
+    抠短号时 "+" 必须跟着走：否则 CCTV-5+ 会顺手把 "cctv5" 抢走，体育频道就认错台了。
+    （名字那两路与查询侧共用 _epg_name_keys —— 登记什么、查什么，必须同一套写法。）"""
+    keys = _epg_name_keys(channel_name)
+    n = _epg_norm(cid)
+    if n and n not in keys:
+        keys.append(n)
+    return keys
+
+
+def cctv_epg_int(v):
+    """接口的数字字段逐个解析，解不出来当 0，绝不牵连别的字段。
+    实测(2026-11-02) startTime/endTime/length 都是整数秒，但length这类字段最容易被
+    官方改成 "20:00" 的时长串 —— 所以顺手支持冒号写法；
+    关键是别像早期写法那样三个字段一个 try：length 读不懂会把 startTime 完好的整条节目丢掉。"""
+    s = str(v if v is not None else "").strip()
+    if not s:
+        return 0
+    if ":" in s:                                  # "20:00" / "1:20:00" -> 秒
+        try:
+            parts = [int(x) for x in s.split(":")]
+        except ValueError:
+            return 0
+        n = 0
+        for x in parts:
+            if x < 0:
+                return 0
+            n = n * 60 + x
+        return n
+    try:
+        return int(float(s))
+    except ValueError:
+        return 0
+
+
+def cctv_epg_live_title(rows, live, live_st):
+    """把"此刻在播"那一档的标题换成官方 isLive 的写法 —— 卫视的表里常常只写"电视剧"，
+    而 isLive 是"电视剧：问心2第17集"(实测 2026-11-02)。只在 isLive 更长更具体时才换，
+    免得哪天反过来把具体名字换成大类。"""
+    if not live or live_st <= 0:
+        return rows
+    out = []
+    for st, sp, title in rows:
+        if st <= live_st < sp and len(live) > len(title):
+            out.append((st, sp, live))
+        else:
+            out.append((st, sp, title))
+    return out
+
+
+def cctv_epg_parse(payload):
+    """接口 JSON -> (progs, names, by_name)。脏数据一律丢：没标题、没开始时间的条目不要；
+    endTime 早于或等于 startTime 的用官方 length 补，length 也没有就按 1 小时算。"""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("节目单里没有 data")
+    progs, names, by_name = {}, {}, {}
+    for cid, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        rows = []
+        for it in (info.get("list") or []):
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "").strip()
+            st, sp, ln = (cctv_epg_int(it.get("startTime")),
+                          cctv_epg_int(it.get("endTime")),
+                          cctv_epg_int(it.get("length")))
+            if not title or st <= 0:
+                continue
+            if sp <= st:
+                sp = st + (ln if ln > 0 else 3600)
+            rows.append((st, sp, title))
+        if not rows:
+            continue
+        rows.sort(key=lambda x: x[0])
+        rows = cctv_epg_live_title(rows, str(info.get("isLive") or "").strip(),
+                                   cctv_epg_int(info.get("liveSt")))
+        progs[cid] = rows
+        nm = str(info.get("channelName") or "").strip()
+        names[cid] = nm or cid
+        for k in cctv_epg_keys(nm, cid):
+            by_name.setdefault(k, cid)
+    for cid, aliases in CEPG_ALIAS.items():
+        if cid in progs:
+            for k in aliases:
+                n = _epg_norm(k)
+                if n:
+                    by_name.setdefault(n, cid)
+    return progs, names, by_name
+
+
+def _cctv_epg_snapshot():
+    with _CEPG_LOCK:
+        return {"ok": _CEPG["ok"], "msg": _CEPG["msg"], "fetched": _CEPG["fetched"],
+                "count": _CEPG["count"], "days": _CEPG["days"],
+                "next_try": _CEPG["next_try"], "channels": len(_CEPG["names"])}
+
+
+def _cctv_epg_save_cache():
+    with _CEPG_LOCK:
+        snap = {"fetched": _CEPG["fetched"], "days": _CEPG["days"], "names": dict(_CEPG["names"]),
+                "by_name": dict(_CEPG["by_name"]),
+                "progs": {k: [list(x) for x in v] for k, v in _CEPG["progs"].items()}}
+    try:
+        CEPG_CACHE_PATH.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log("内置节目单缓存写入失败: %s" % e)
+
+
+def _cctv_epg_load_cache(now=None):
+    """重启后如果缓存还是这一轮要的日期，直接复用，别一开机就打官方接口。"""
+    now = time.time() if now is None else now
+    try:
+        if not CEPG_CACHE_PATH.exists():
+            return False
+        d = json.loads(CEPG_CACHE_PATH.read_text(encoding="utf-8"))
+        progs = {k: [tuple(x) for x in v] for k, v in (d.get("progs") or {}).items()}
+        if not progs:
+            return False
+        if now - float(d.get("fetched") or 0) > CEPG_TTL:
+            return False
+        if str(d.get("days") or "") != cctv_epg_days(now):
+            return False
+        with _CEPG_LOCK:
+            _CEPG.update(ok=True, msg="", fetched=float(d.get("fetched") or 0),
+                         progs=progs, by_name=dict(d.get("by_name") or {}),
+                         names=dict(d.get("names") or {}), count=len(progs),
+                         days=str(d.get("days") or ""), next_try=0.0)
+        log("内置节目单: 复用缓存(%d 个频道，%.1f 分钟前抓的)"
+            % (len(progs), (now - float(d.get("fetched") or 0)) / 60.0))
+        return True
+    except Exception as e:
+        log("内置节目单缓存读取失败(忽略，改用在线抓取): %s" % e)
+        return False
+
+
+def cctv_epg_refresh(cfg, force=False, now=None):
+    """抓一次内置节目单。成功 True；失败只写日志、只把 next_try 往后推，
+    旧缓存继续顶着用 —— 界面最多显示回上一次的时刻，不会突然全是「—」。"""
+    if not cfg.get("cctv_epg", True):
+        with _CEPG_LOCK:
+            _CEPG.update(ok=False, msg="内置节目单已关闭", progs={}, by_name={},
+                         names={}, count=0, fetched=0.0, next_try=0.0, days="")
+        return False
+    now = time.time() if now is None else now
+    cur = _cctv_epg_snapshot()
+    days = cctv_epg_days(now)
+    if not force:
+        if cur["ok"] and cur["days"] == days and now - cur["fetched"] < CEPG_TTL:
+            return True
+        if now < (cur["next_try"] or 0):
+            return False
+    t0 = time.monotonic()
+    all_progs, all_names, all_by = {}, {}, {}
+    try:
+        for d in days.split("+"):
+            raw = _epg_fetch(CEPG_URL % (",".join(CEPG_CHANNELS), d), timeout=25)
+            obj = json.loads(cctv_epg_strip_jsonp(raw.decode("utf-8", "replace")))
+            if isinstance(obj, dict) and obj.get("errcode"):
+                raise ValueError("接口 %s: %s" % (obj.get("errcode"), obj.get("msg")))
+            progs, names, by_name = cctv_epg_parse(obj)
+            for cid, rows in progs.items():
+                all_progs.setdefault(cid, []).extend(rows)
+            all_names.update(names)
+            for k, v in by_name.items():
+                all_by.setdefault(k, v)
+        if not all_progs:
+            raise ValueError("接口没给任何节目单")
+        for cid, rows in all_progs.items():
+            all_progs[cid] = sorted(set(rows), key=lambda x: x[0])   # 今天/明天交界处会重一条
+        with _CEPG_LOCK:
+            _CEPG.update(ok=True, msg="", progs=all_progs, by_name=all_by,
+                         names=all_names, count=len(all_progs), fetched=now,
+                         next_try=0.0, days=days)
+        _cctv_epg_save_cache()
+        log("内置节目单: 已载入 %d 个频道 %d 档节目(%s, %.1fs)"
+            % (len(all_progs), sum(len(v) for v in all_progs.values()), days,
+               time.monotonic() - t0))
+        return True
+    except Exception as e:
+        with _CEPG_LOCK:
+            if _CEPG["ok"]:
+                _CEPG["next_try"] = now + CEPG_RETRY        # 有旧数据就别清空
+            else:
+                _CEPG.update(ok=False, msg="内置节目单抓取失败: %s" % e,
+                             next_try=now + CEPG_RETRY)
+        log("内置节目单抓取失败(界面显示 —，不影响其它功能): %s" % e)
+        return False
+
+
+def cctv_epg_loop(cfg):
+    """后台线程：60 秒醒一次，只在"没抓到 / 过期 / 日期该滚了"时才动手，绝不挡首屏。
+    醒得勤是因为节目单按本地时间算，跨天(22:00 取明天、00:00 换今天)得当天就发现。"""
+    if cfg.get("cctv_epg", True):      # 关着就别读缓存，否则重启后又把节目单"复活"了
+        try:
+            _cctv_epg_load_cache()
+        except Exception:
+            pass
+    while True:
+        try:
+            if cfg.get("cctv_epg", True):
+                cctv_epg_refresh(cfg)
+        except Exception as e:          # 后台线程不许把程序带崩
+            log("内置节目单线程异常(已忽略): %s" % e)
+        time.sleep(60)
+
+
+# ---------------------------------------------------------------- 内置第三方节目表(补卫视的剧名)
+# 2026-11-02：官方接口有个天花板——卫视那一栏经常只写一个大类词。实测浙江卫视当天
+# list.title="电视剧"、isLive 也是"电视剧"，换参数(f=json)问还是"电视剧"，别的入口
+# (getEpgInfoByChannel / getEpgInfo)一律 1100 拒绝访问 —— 官方就没往下写，不是我们没取。
+# 于是再加一份内置的公开 XMLTV 专门补这个洞（用户的话：「关键显示好多都是电视剧，没有节目名字」）：
+#   GET https://epg.zsdc.eu.org/t.xml.gz
+#   Cloudflare Pages 上的开源项目 suzukua/epg（抓运营商 EPG）：135 个台 / 3.7 万档 /
+#   7 天回看 + 5 天预告 / 每天至少更新两次。实测(2026-11-02，本机云南 IPv4)：513KB(gz)、
+#   解压 5.9MB、0.6s、免鉴权，台名就是可读的 id("湖南卫视"/"CCTV1")，认台不用另建表。
+# 它比官方细的正好是用户要的那类：深圳卫视「神枪之倒刺(20)」、北京卫视「琅琊榜(7)」、
+# 天津卫视「五号特工组之偷天换月(12)」、广东卫视「上海滩生死较量(31)」；官方压根没有的台
+# (山西/陕西/海南卫视、金鹰纪实、优漫卡通)它也有。
+# 但它是"另一份"不是"更好"：央视系的档名它写得比官方糙，所以规则是——官方给了具体名字的
+# 一律不动，只有官方只给大类词(或官方没有)时才取它。本机 81 张卡片实测：官方已给具体名字
+# 32 张、这份再补 23 张、剩 26 张两边都没有(港台/国际/地方影视频道，只能自己填 XMLTV 地址)。
+# 盘上缓存只留"此刻前后这一截"（见 _bepg_prune），否则 3.7 万档写进 JSON 是几 MB 的白占。
+# 同一个仓库还有 GitHub Pages 那份(字节数一致)，两个都试：境外 Cloudflare 偶尔抽风时还有备胎，
+# 反过来 github.io 被墙时靠主地址 —— 2026-11-02 本机实测主 0.55s / 备 1.12s。
+BEPG_URLS = ("https://epg.zsdc.eu.org/t.xml.gz",
+             "https://suzukua.github.io/epg/t.xml.gz")
+BEPG_TTL = 6 * 3600                 # 它每天更新两次，6 小时抓一轮够新：一天 4 次 × 513KB ≈ 2MB
+BEPG_RETRY = 30 * 60                # 境外站点，失败后别一直撞
+BEPG_CACHE_PATH = BASE / "builtin_epg_cache.json"
+# 官方只写到这一层的大类词：命中就允许换到第三方那份（整词比对，"电视剧：xxx"这种带名字的算具体名字）
+BEPG_GENERIC = frozenset(("电视剧", "纪录片", "动画片", "电影", "经典电影", "综艺",
+                          "体育", "新闻", "科教", "财经", "专题"))
+# 第三方那份里的"占位档"：台名都不对、写着"请欣赏××卫视精彩节目"(51zmt 那份实测一大片)，
+# 这种取过来比「—」还差，直接当没有。参考同类项目的约定：占位/冻结模板一律视作"官方没发"。
+BEPG_JUNK = re.compile(u"(请欣赏|敬请期待|精彩节目|精彩即将|即将呈现|广告|垫片|测试频道|无节目|暂无)")
+
+_BEPG_LOCK = threading.Lock()
+_BEPG = {
+    "ok": False, "msg": "内置第三方节目表还没开始抓", "fetched": 0.0, "next_try": 0.0,
+    "progs": {},      # 台 id -> [(开始ts, 结束ts, 节目名), ...]（已剪成此刻前后一截，升序）
+    "by_name": {},    # 归一化台名 -> id
+    "count": 0,
+    "url": "",        # 这次是从哪个地址抓到的（备胎生效时界面/日志要说清楚）
+}
+
+
+def _epg_generic(title):
+    """这一档是不是"只写了个类别"（电视剧/纪录片…）——是就值得再问问别的来源。"""
+    return str(title or "").strip() in BEPG_GENERIC
+
+
+def _epg_useful(title):
+    """第三方那份能不能拿出手：不是占位档就行（"上午剧场"这种剧场名算有用，总比空着强）。"""
+    t = str(title or "").strip()
+    return bool(t) and not BEPG_JUNK.search(t)
+
+
+def _bepg_prune(progs, now):
+    """只留此刻前 12 小时到后 36 小时这一段：内存和盘上缓存都小一个量级，
+    界面上"正在播出"和 15 分钟内的那次自动重取都够用。"""
+    lo, hi = now - 12 * 3600, now + 36 * 3600
+    out = {}
+    for cid, rows in (progs or {}).items():
+        keep = [x for x in rows if x[1] > lo and x[0] < hi]
+        if keep:
+            out[cid] = keep
+    return out
+
+
+def _bepg_snapshot():
+    with _BEPG_LOCK:
+        return {"ok": _BEPG["ok"], "msg": _BEPG["msg"], "fetched": _BEPG["fetched"],
+                "count": _BEPG["count"], "next_try": _BEPG["next_try"], "url": _BEPG["url"]}
+
+
+def _bepg_save_cache():
+    with _BEPG_LOCK:
+        snap = {"fetched": _BEPG["fetched"], "url": _BEPG["url"],
+                "progs": _BEPG["progs"], "by_name": _BEPG["by_name"]}
+    try:
+        BEPG_CACHE_PATH.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        return True
+    except (OSError, TypeError) as e:
+        log("内置第三方节目表缓存写入失败: %s" % e)
+        return False
+
+
+def _bepg_load_cache(now=None):
+    """启动时复用 TTL 内的盘上缓存，重启不重复下载 5MB。"""
+    now = time.time() if now is None else now
+    try:
+        if not BEPG_CACHE_PATH.exists():
+            return False
+        d = json.loads(BEPG_CACHE_PATH.read_text(encoding="utf-8"))
+        fetched = float(d.get("fetched") or 0)
+        progs = {k: [tuple(x) for x in v] for k, v in (d.get("progs") or {}).items()}
+        if not progs or now - fetched > BEPG_TTL:
+            return False
+        with _BEPG_LOCK:
+            _BEPG.update(ok=True, msg="", progs=progs, by_name=d.get("by_name") or {},
+                         count=len(progs), fetched=fetched, next_try=0.0,
+                         url=d.get("url") or "")
+        log("内置第三方节目表: 复用缓存(%d 个频道，%.1f 小时前抓的)"
+            % (len(progs), (now - fetched) / 3600))
+        return True
+    except Exception:
+        return False
+
+
+def bepg_refresh(cfg, force=False, now=None):
+    """抓一次内置第三方节目表。它只是"补洞"的那一份：抓不到不影响官方那份照常显示。
+    两个地址按顺序试（Cloudflare Pages / GitHub Pages 同一份数据），谁先通就用谁。"""
+    if not cfg.get("cctv_epg", True):
+        with _BEPG_LOCK:
+            _BEPG.update(ok=False, msg="内置节目单已关闭", progs={}, by_name={},
+                         count=0, fetched=0.0, next_try=0.0, url="")
+        return False
+    now = time.time() if now is None else now
+    cur = _bepg_snapshot()
+    if not force:
+        if cur["ok"] and now - cur["fetched"] < BEPG_TTL:
+            return True
+        if now < (cur["next_try"] or 0):
+            return False
+    t0 = time.monotonic()
+    err = ""
+    for url in BEPG_URLS:
+        try:
+            raw = _epg_fetch(url, timeout=30)
+            progs, by_name = _epg_parse(raw)
+            progs = _bepg_prune(progs, now)
+            if not progs:
+                raise ValueError("节目单里没有此刻用得上的 <programme>")
+            with _BEPG_LOCK:
+                _BEPG.update(ok=True, msg="", progs=progs, by_name=by_name,
+                             count=len(progs), fetched=now, next_try=0.0, url=url)
+            _bepg_save_cache()
+            log("内置第三方节目表: 已载入 %d 个频道 %d 档节目(%s, %.1fs)"
+                % (len(progs), sum(len(v) for v in progs.values()),
+                   "github" if "github" in url else "zsdc", time.monotonic() - t0))
+            return True
+        except Exception as e:
+            err = "%s: %s" % (url.split("/")[2], e)
+    with _BEPG_LOCK:
+        if _BEPG["ok"]:
+            _BEPG["next_try"] = now + BEPG_RETRY        # 旧数据继续顶着
+        else:
+            _BEPG.update(ok=False, msg="第三方节目表抓取失败: %s" % err,
+                         next_try=now + BEPG_RETRY)
+    log("内置第三方节目表抓取失败(只用官方那份，不影响其它功能): %s" % err)
+    return False
+
+
+def bepg_loop(cfg):
+    """后台线程：60 秒醒一次，TTL/退让都在 bepg_refresh 里判，绝不挡首屏。"""
+    if cfg.get("cctv_epg", True):
+        try:
+            _bepg_load_cache()
+        except Exception:
+            pass
+    while True:
+        try:
+            if cfg.get("cctv_epg", True):
+                bepg_refresh(cfg)
+        except Exception as e:          # 后台线程不许把程序带崩
+            log("内置第三方节目表线程异常(已忽略): %s" % e)
+        time.sleep(60)
 
 
 _fav_load()      # 启动即读收藏；文件坏了也只是空列表，不影响其它功能
@@ -4467,8 +5135,12 @@ main{max-width:1180px;margin:0 auto;padding:16px 20px 92px;display:flex;flex-dir
 
 /* ===== 列表（表格）===== */
 .list{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+/* 【2026-11-02 用户「都看不见播放什么节目」】原来 6 列等宽(各 ~180px)：台标只要 104px、
+   分组只要两个字、速度不到 80px，宽度全浪费在这三列上；"正在播出"和频道名平分剩下的，
+   节目名被挤成「江海潮…」四五个字，等于没显示。改成按需分配 —— 台标/分组/速度钉死
+   实际需要的宽度，省下来的全给"频道"和"正在播出"（后者权重最大）。 */
 .thead,.tr{display:grid;align-items:center;gap:8px;padding:0 12px;
-  grid-template-columns: 26px repeat(6, minmax(0,1fr)) 32px}
+  grid-template-columns: 26px 112px minmax(0,1.15fr) 62px minmax(0,1fr) minmax(0,1.6fr) 92px 32px}
 .thead>div{text-align:center;justify-content:center}
 .tr>div{text-align:center}
 .tr>.nm,.tr>.grp,.tr>.qa,.tr>.epg,.tr>.spd{justify-content:center}
@@ -4549,9 +5221,15 @@ html[data-theme="light"] .tag.q4{color:#6d28d9}
   border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line));
   color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
 
-/* 正在播出（EPG） */
-.epg{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-micro);color:var(--txt-3)}
-.epg b{color:var(--txt-2);font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 正在播出（EPG）
+   【2026-11-02 用户「节目名字可以放在时间下面，写的内容就多点」】原来是横排一行：
+   节目名和时间+进度条抢同一列的宽度，长名字只能显示四五个字就省略。改成两行 ——
+   第一行时间+进度条（本来就短），第二行节目名独占整列宽度，能多写一倍的字。 */
+.epg{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  min-width:0;font-size:var(--fs-micro);color:var(--txt-3)}
+.epg .l1{display:flex;align-items:center;gap:6px;min-width:0}
+.epg b{color:var(--txt-2);font-weight:550;font-size:var(--fs-meta);max-width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
 .epg .tm{flex:0 0 auto;font-variant-numeric:tabular-nums}
 .epg .bar{width:44px;height:3px;border-radius:2px;background:var(--line);overflow:hidden;flex:0 0 auto}
 .epg .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
@@ -4770,7 +5448,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
       <button class="chip" data-f="ok" data-label="仅看清晰" title="分辨率 ≥1080P 且 码率 ≥2 Mbps（只看画面清晰，不管网络速度）">仅看清晰</button>
       <button class="chip" data-s="1" data-label="网络 400KB/s+" title="实测下载吞吐 ≥400 KB/s（≈3.2 Mbps）—— 达到这个速度看着不卡">网络 400KB/s+</button>
       <span class="qsep"></span>
-      <button class="chip" data-q="bad" data-label="有问题" title="码率不到 2 Mbps 或 分辨率低于 620 行 —— 单独看这一批, 好知道哪些源该换">有问题</button>
+      <button class="chip" data-q="bad" data-label="有问题" title="码率不到当前分辨率档的及格线(4K 8M / 1080P 2M / 720P 1.2M / 更低 0.6M)，或 分辨率低于 620 行 —— 单独看这一批, 好知道哪些源该换">有问题</button>
     </div>
   </section>
 
@@ -4844,7 +5522,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
           <div class="f">每个频道备用源数量<input type="number" id="c_bak" min="1" max="8"></div>
           <div class="f">最低码率 Mbps（低于此值不显示/不导出，0=不限）
             <input type="number" id="c_min" min="0" max="50" step="0.5"></div>
-          <div class="f">EPG 节目单地址（可留空；填好就能显示"正在播出"）
+          <div class="f">自定义 EPG 地址（可留空；留空就用下面这份内置节目单）
             <input type="text" id="c_epg" placeholder="http://…/epg.xml"></div>
           <div class="f">保存位置<input type="text" id="c_out" placeholder="M3U 输出路径"></div>
           <div class="f">每个频道写入几条线路
@@ -4855,9 +5533,11 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
           <label class="ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
           <label class="ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
+          <label class="ck"><input type="checkbox" id="c_cepg">内置节目单（央视官方 + 一份公开完整节目表补卫视剧名，自动更新、不用填地址）</label>
           <label class="ck"><input type="checkbox" id="c_lan">允许手机/平板在局域网访问（手机导入用）</label>
           <label class="ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
           <div class="f hint" id="lanHint" style="grid-column:1/-1"></div>
+          <div class="f hint" id="cepgHint" style="grid-column:1/-1"></div>
         </div>
       </div>
 
@@ -4909,7 +5589,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
 <div id="toast"></div>
 <script>
 "use strict";
-var CH=[], EPG={}, sel=new Set(), favSet=new Set();
+var CH=[], EPG={}, EPMETA=null, sel=new Set(), favSet=new Set();
 var grp="", rf="", qf="", qk="", sf="", kw="", sk="hot", fa=false, favOnly=false;
 var VERSION="-", DESKTOP="", selLoaded=false, dirty=false, fresh=false, wasUpdating=false;
 var loadedOnce=false, epgTimer=null;
@@ -4959,6 +5639,13 @@ if(window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEvent
 /* ---------------- 画质判据（与后端 quality_label / _src_quality 同一套口径）---------------- */
 var REST=[[2000,4,"4K"],[1000,3,"1080P"],[620,2,"720P"],[400,1,"480P"]];
 var CLARITY_H=1000, CLARITY_MB=2.0, SMOOTH_KB=400;
+/* 「码率不足」按分辨率分档(与后端 BIT_FLOOR 同一张表, tests/test_logic.py 会比对两边是否一致)：
+   1080P=2M 是用户给的锚点，4K 像素是它的 4 倍→8M，720P≈0.44 倍→1.2M，480P≈0.2 倍→0.6M。
+   以前全场景只有一条 2M 线：720P/1.5M 的正常源被误挂角标，4K/3M 的虚标源反而没人管。 */
+var BIT_FLOOR=[[1800,8.0],[1000,2.0],[620,1.2],[1,0.6]];
+function bitFloor(r){ r=r||0; if(!(r>0)) return CLARITY_MB;
+  for(var i=0;i<BIT_FLOOR.length;i++){ if(r>=BIT_FLOOR[i][0]) return BIT_FLOOR[i][1] }
+  return BIT_FLOOR[BIT_FLOOR.length-1][1] }
 function resLv(r){ r=r||0; if(r<=0) return 0; for(var i=0;i<REST.length;i++){ if(r>=REST[i][0]) return REST[i][1] } return 0.3 }
 function mbLv(m){ m=m||0; if(m<=0) return 0; if(m>=9) return 4; if(m>=5) return 3; if(m>=2.5) return 2; if(m>=1) return 1; return 0.3 }
 function resName(r){ var l=resLv(r); if(!l) return ""; if(l<1) return "低分辨率";
@@ -4968,14 +5655,14 @@ function mbpsTxt(m){ return (m||0).toFixed(1)+"M" }
 function qScore(c){
   var b=c.best||{}, m=b.mbps||0, rs=resLv(b.res||0);
   if(!(m>0)) return rs?(rs*10*0.35):2.0;
-  var adequate=Math.min(1, m/CLARITY_MB);
+  var adequate=Math.min(1, m/bitFloor(b.res||0));
   var bonus=Math.min(1, m/10)*5;
   var base=rs||2.0;
   return base*10*(0.55+0.45*adequate)+bonus;
 }
 function clearEnough(c){ var b=c.best||{}; return (b.res||0)>=CLARITY_H && (b.mbps||0)>=CLARITY_MB }
 function smoothEnough(c){ return kbps(c)>=SMOOTH_KB }
-function lowBit(c){ var m=(c.best||{}).mbps||0; return m>0 && m<CLARITY_MB }
+function lowBit(c){ var b=c.best||{}; var m=b.mbps||0; return m>0 && m<bitFloor(b.res||0) }
 function lowRes(c){ var r=(c.best||{}).res||0; return r>0 && r<620 }
 function detailText(c){
   var b=c.best||{}, p=[];
@@ -5202,27 +5889,61 @@ function fitLogos(root){
   }
 }
 
-/* ---------------- 正在播出（EPG）---------------- */
+/* ---------------- 正在播出（EPG）----------------
+   数据有三份来源（服务端已经合好，一条节目只回一个）：用户填的自定义 XMLTV 最优先，
+   然后是央视官方接口——但它对卫视常常只写"电视剧"这种大类词，于是再问一份内置的公开
+   完整节目表；官方给了具体名字的台不动。EPMETA 存的是 /api/epg 回的状态头，设置弹窗里
+   那行"内置节目单：…个台 / N 个频道显示得出节目名"就用它，让用户看得见它到底在不在工作。 */
 function epgHtml(c){
   var e=EPG[c.key];
-  if(!e) return '<div class="epg" title="没有 EPG 数据（设置里填 EPG 地址即可显示）"><span class="tm">—</span></div>';
+  if(!e) return '<div class="epg" title="这台在央视官方和公开节目表里都没有节目单（多为港台/国际/地方影视频道；有别的 EPG 地址可在设置里填）"><div class="l1"><span class="tm">—</span></div></div>';
   var w=Math.max(0,Math.min(100,e.p||0));
   return '<div class="epg" title="正在播出：'+esc(e.t)+'（'+esc(e.s)+'–'+esc(e.e)+'）">'
-    +'<b>'+esc(e.t)+'</b><span class="tm">'+esc(e.s)+'–'+esc(e.e)+'</span>'
-    +'<span class="bar"><i data-s0="'+(e.s0||0)+'" data-e0="'+(e.e0||0)+'" style="width:'+w+'%"></i></span></div>';
+    +'<div class="l1"><span class="tm">'+esc(e.s)+'–'+esc(e.e)+'</span>'
+    +'<span class="bar"><i data-s0="'+(e.s0||0)+'" data-e0="'+(e.e0||0)+'" style="width:'+w+'%"></i></span></div>'
+    +'<b>'+esc(e.t)+'</b></div>';
 }
+var EPGRELOAD=0;                       // 上次"播完就立刻重取"的时间，防止连环请求
 function tickEpg(){
-  var now=Date.now()/1000;
+  var now=Date.now()/1000, ended=false;
   [].forEach.call(document.querySelectorAll(".epg .bar i"),function(el){
     var s0=+el.dataset.s0, e0=+el.dataset.e0;
     if(!s0||!e0||e0<=s0) return;
     var p=Math.max(0,Math.min(100,(now-s0)*100/(e0-s0)));
     el.style.width=p.toFixed(1)+"%";
+    if(now>=e0 && now-e0<900) ended=true;   // 刚播完(15 分钟内)：该换成下一条了
   });
+  // 进度条是本地走的，但"下一条节目"要问服务端才有。以前只能等 5 分钟一轮的定时刷新，
+  // 一档节目播完了界面上还挂着它；现在看到播完点已过就立刻再问一次 ——
+  // /api/epg 只读内存缓存（不碰网络），一次本机请求很便宜，20 秒内不重复。
+  if(ended && Date.now()-EPGRELOAD>20000){ EPGRELOAD=Date.now(); loadEpg(); }
+}
+function epgHint(){
+  var el=$("cepgHint");
+  if(!el) return;
+  var b=(EPMETA&&EPMETA.cctv)||null, x=(EPMETA&&EPMETA.bepg)||null, u=(EPMETA&&EPMETA.custom)||null;
+  if(!b){ el.textContent="内置节目单：正在等第一轮抓取结果…"; return; }
+  if(!b.on){ el.textContent="内置节目单已关闭，只有填了自定义 EPG 地址的频道会显示节目。"; return; }
+  var ago=Math.max(0,Math.round((Date.now()/1000-(EPMETA.fetched||0))/60));
+  var src=["央视官方 "+(b.channels||0)+" 个台"];
+  if(x) src.push("公开节目表 "+(x.count||0)+" 个台");
+  var bad=[];
+  if(!b.ok) bad.push("央视官方这轮没抓到");
+  if(x&&!x.ok) bad.push("公开节目表这轮没抓到");
+  if(bad.length)
+    el.innerHTML="<b>"+esc(bad.join("、"))+"</b>（"+esc(((b.msg||"")+(x&&x.msg?" / "+x.msg:"")).slice(0,60))
+      +"，旧的先用着，稍后自动重试）";
+  else
+    el.innerHTML="内置节目单："+esc(src.join(" + "))
+      +"，本机 "+(EPMETA.total||0)+" 个频道里 <b>"+(EPMETA.count||0)+"</b> 个显示得出节目名"
+      +"（官方 <b>"+(b.matched||0)+"</b> · 公开表补 <b>"+((x&&x.matched)||0)+"</b>"
+      +((u&&u.matched)?(" · 自定义 <b>"+u.matched+"</b>"):"")+"）"
+      +"，"+ago+" 分钟前更新，之后自动继续更新";
 }
 function loadEpg(){
   fetch("/api/epg").then(function(r){return r.json()}).then(function(d){
-    EPG = d.now || {};
+    EPG = d.now || {}; EPMETA = d;
+    if($("cfgMask") && $("cfgMask").classList.contains("show")) epgHint();
     renderRows();
   }).catch(function(){});
 }
@@ -5326,7 +6047,7 @@ function rowHtml(c){
     +'<div class="qa" title="'+esc(alive?detailText(c):"这一路没连上")+'">'
       +'<span class="'+tagCls(c)+'">'+esc(alive?tagText(c):"不可用")+'</span>'
       +'<span class="meta">'+esc(alive?qText(c):"—")+'</span>'
-      +((alive&&lowBit(c))?'<span class="lowb" title="码率不到 2 Mbps：用户实测这个码率画面就一般了">码率不足</span>':'')
+      +((alive&&lowBit(c))?'<span class="lowb" title="码率不到这一档的及格线(4K 要 8M、1080P 要 2M、720P 要 1.2M、更低要 0.6M)：实测这个码率画面就一般了">码率不足</span>':'')
       +((alive&&lowRes(c))?'<span class="lowr" title="实测分辨率不到 720P，码率再高画面也细不了">分辨率低</span>':'')
     +'</div>'
     +epgHtml(c)
@@ -5650,6 +6371,7 @@ function openCfg(){
     $("c_lo").checked=c.hide_local!==false;
     $("c_urls").value=(c.urls_per_channel===undefined?3:c.urls_per_channel);
     $("c_lan").checked=!!c.lan;
+    $("c_cepg").checked=c.cctv_epg!==false;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -5663,6 +6385,8 @@ function openCfg(){
       $("lanHint").innerHTML = s.lan
         ? ('手机/电视盒导入地址：<b>'+(s.lan_url||"（没拿到局域网 IP）")+'</b>　（填到播放器的"添加 M3U 订阅"里，同一 Wi-Fi 下可用）')
         : '想用手机看：勾上上面这项并保存，程序会重启一次，然后把这里给出的地址填进手机播放器。';
+      epgHint();
+      if(!EPMETA) loadEpg();      // 状态还没拿到过(极少见)：要一次，回来会自动刷这行提示
       var st=s.source_stats||{};
       $("c_srcs").innerHTML=SRCS.map(function(x){
         var e=st[x.key];
@@ -5697,7 +6421,8 @@ $("btnCfgSave").addEventListener("click",function(){
     lan:$("c_lan").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
-    epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
+    epg_url:$("c_epg").value.trim(), cctv_epg:$("c_cepg").checked,
+    open_browser:$("c_browser").checked,
     tray:$("c_tray").checked, autostart:$("c_auto").checked, task_registered:$("c_task").checked,
     self_update:$("c_su").checked, require_sig:$("c_sig").checked, update_auto:$("c_suauto").checked,
     update_url:$("c_url").value.trim(), update_check_hours:+$("c_suh").value, sources:srcs
@@ -5705,7 +6430,9 @@ $("btnCfgSave").addEventListener("click",function(){
   fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
     .then(function(r){return r.json()}).then(function(d){
       if(d.ok){ toast("设置已保存，新的更新间隔从下次开始生效"); closeCfg(); loadStatus();
-        if(body.epg_url){ setTimeout(loadEpg,1500); } }
+        // EPG 两项(自定义地址 / 内置开关)一保存服务端就重抓，这里隔 1.5s 和 9s 各问一次：
+        // 第一次通常已经抓完，没抓完(自定义地址慢)还有第二次兜住。
+        setTimeout(loadEpg,1500); setTimeout(loadEpg,9000); }
       else toast(d.msg||"保存失败");
     }).catch(function(){toast("保存失败")});
 });
@@ -6012,7 +6739,7 @@ class Handler(BaseHTTPRequestHandler):
                                "count": len(items),
                                "matched": len(_fav_keys_of(chs))})
         if path == "/api/epg":
-            # 只读内存缓存：绝不在这里抓网络（抓取在 epg_loop 后台线程里）
+            # 只读内存缓存：绝不在这里抓网络（抓取在 epg_loop / cctv_epg_loop / bepg_loop 后台线程里）
             now = time.time()
             with self.updater.lock:
                 chs = list(self.updater.channels.values())
@@ -6022,9 +6749,23 @@ class Handler(BaseHTTPRequestHandler):
                 if it and c.get("key"):
                     nxt[c["key"]] = it
             meta = _epg_snapshot()
-            return self._json({"ok": bool(meta["ok"]), "now": nxt, "count": len(nxt),
-                               "total": len(chs), "fetched": meta["fetched"],
-                               "url": meta["url"], "msg": meta["msg"], "ts": int(now)})
+            cmeta = _cctv_epg_snapshot()
+            bmeta = _bepg_snapshot()
+            on = bool(self.cfg.get("cctv_epg", True))
+            cmeta["on"] = bmeta["on"] = on
+            # 三份来源各对上几条，界面上那行状态要说得清（用户问的就是"到底有没有节目名"）
+            src_n = {}
+            for v in nxt.values():
+                src_n[v.get("src") or "?"] = src_n.get(v.get("src") or "?", 0) + 1
+            cmeta["matched"] = src_n.get("cctv", 0)
+            bmeta["matched"] = src_n.get("builtin", 0)
+            meta["matched"] = src_n.get("custom", 0)
+            return self._json({"ok": bool(meta["ok"] or cmeta["ok"] or bmeta["ok"]),
+                               "now": nxt, "count": len(nxt), "total": len(chs),
+                               "fetched": max(meta["fetched"], cmeta["fetched"],
+                                              bmeta["fetched"]),
+                               "url": meta["url"], "msg": meta["msg"], "custom": meta,
+                               "cctv": cmeta, "bepg": bmeta, "ts": int(now)})
         if path == "/api/settings":
             return self._json({
                 **{k: v for k, v in self.cfg.items() if k != "sources"},
@@ -6103,9 +6844,15 @@ class Handler(BaseHTTPRequestHandler):
                                "count": total, "keys": [it["key"] for it in _fav_items()]})
         if path == "/api/epg":
             # 手动刷新节目单：丢给后台线程，立刻返回（界面不会卡住等一个几 MB 的下载）
+            # 三份来源一起刷：用户自己的 XMLTV + 内置央视官方 + 内置第三方节目表
+            #（后两份在开关关着时函数内部会自己清空）
             try:
                 threading.Thread(target=epg_refresh, args=(self.cfg,), kwargs={"force": True},
                                  daemon=True).start()
+                threading.Thread(target=cctv_epg_refresh, args=(self.cfg,),
+                                 kwargs={"force": True}, daemon=True).start()
+                threading.Thread(target=bepg_refresh, args=(self.cfg,),
+                                 kwargs={"force": True}, daemon=True).start()
                 return self._json({"ok": True, "msg": "已开始刷新节目单"})
             except Exception as e:
                 return self._json({"ok": False, "msg": "刷新失败: %s" % e})
@@ -6143,15 +6890,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             try:
                 _prev_epg = str(self.cfg.get("epg_url") or "").strip()
+                _prev_cepg = bool(self.cfg.get("cctv_epg", True))
                 new = {k: data[k] for k in ("interval_hours", "backups", "keep_sd", "filter_junk", "only_tv", "min_mbps", "hide_local", "urls_per_channel", "lan",
                                             "legal_ack",
          "output_path",
-                                            "epg_url", "open_browser", "autostart", "task_registered",
+                                            "epg_url", "cctv_epg", "open_browser", "autostart", "task_registered",
                                             "self_update", "update_url", "update_auto", "require_sig",
                                             "tray", "update_check_hours") if k in data}
                 self.cfg.update(new)
                 self.cfg["update_check_hours"] = max(1, min(720, int(self.cfg.get("update_check_hours", 24))))
                 self.cfg["require_sig"] = bool(self.cfg.get("require_sig", True))
+                self.cfg["cctv_epg"] = bool(self.cfg.get("cctv_epg", True))
                 if "sources" in data:
                     for k, v in data["sources"].items():
                         if k in self.cfg["sources"]:
@@ -6181,6 +6930,18 @@ class Handler(BaseHTTPRequestHandler):
                     with _EPG_LOCK:
                         _EPG["next_try"] = 0.0
                     threading.Thread(target=epg_refresh, args=(self.cfg,),
+                                     kwargs={"force": True}, daemon=True).start()
+                # 内置节目单开关换了（它同时管央视官方和第三方补洞那两份）：
+                # 开→后台立刻各抓一次；关→函数内部自己清空缓存，
+                # 界面下一轮 tick 就回到"未启用"，不会继续显示旧的节目名。
+                if bool(self.cfg.get("cctv_epg", True)) != _prev_cepg:
+                    with _CEPG_LOCK:
+                        _CEPG["next_try"] = 0.0
+                    with _BEPG_LOCK:
+                        _BEPG["next_try"] = 0.0
+                    threading.Thread(target=cctv_epg_refresh, args=(self.cfg,),
+                                     kwargs={"force": True}, daemon=True).start()
+                    threading.Thread(target=bepg_refresh, args=(self.cfg,),
                                      kwargs={"force": True}, daemon=True).start()
                 self.updater.state["next_update"] = time.time() + self.cfg["interval_hours"] * 3600
                 sync_tray(self.cfg)      # 设置里开关托盘，立刻生效
@@ -6799,6 +7560,10 @@ def main():
     threading.Thread(target=_boot, daemon=True).start()
     # 正在播出(EPG)：后台线程按需抓 XMLTV；首屏不会因为它变慢（缓存不到就显示 —）
     threading.Thread(target=epg_loop, args=(cfg,), daemon=True).start()
+    # 内置央视频目单：用户没填 XMLTV 也能显示"正在播出"，同样只在后台抓
+    threading.Thread(target=cctv_epg_loop, args=(cfg,), daemon=True).start()
+    # 内置第三方节目表：专补官方只写"电视剧"的那批卫视，也是只在后台抓(513KB gz)
+    threading.Thread(target=bepg_loop, args=(cfg,), daemon=True).start()
 
     Handler.updater = up
     Handler.cfg = cfg

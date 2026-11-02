@@ -142,8 +142,12 @@ main{max-width:1180px;margin:0 auto;padding:16px 20px 92px;display:flex;flex-dir
 
 /* ===== 列表（表格）===== */
 .list{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+/* 【2026-11-02 用户「都看不见播放什么节目」】原来 6 列等宽(各 ~180px)：台标只要 104px、
+   分组只要两个字、速度不到 80px，宽度全浪费在这三列上；"正在播出"和频道名平分剩下的，
+   节目名被挤成「江海潮…」四五个字，等于没显示。改成按需分配 —— 台标/分组/速度钉死
+   实际需要的宽度，省下来的全给"频道"和"正在播出"（后者权重最大）。 */
 .thead,.tr{display:grid;align-items:center;gap:8px;padding:0 12px;
-  grid-template-columns: 26px repeat(6, minmax(0,1fr)) 32px}
+  grid-template-columns: 26px 112px minmax(0,1.15fr) 62px minmax(0,1fr) minmax(0,1.6fr) 92px 32px}
 .thead>div{text-align:center;justify-content:center}
 .tr>div{text-align:center}
 .tr>.nm,.tr>.grp,.tr>.qa,.tr>.epg,.tr>.spd{justify-content:center}
@@ -224,9 +228,15 @@ html[data-theme="light"] .tag.q4{color:#6d28d9}
   border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line));
   color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
 
-/* 正在播出（EPG） */
-.epg{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-micro);color:var(--txt-3)}
-.epg b{color:var(--txt-2);font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 正在播出（EPG）
+   【2026-11-02 用户「节目名字可以放在时间下面，写的内容就多点」】原来是横排一行：
+   节目名和时间+进度条抢同一列的宽度，长名字只能显示四五个字就省略。改成两行 ——
+   第一行时间+进度条（本来就短），第二行节目名独占整列宽度，能多写一倍的字。 */
+.epg{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  min-width:0;font-size:var(--fs-micro);color:var(--txt-3)}
+.epg .l1{display:flex;align-items:center;gap:6px;min-width:0}
+.epg b{color:var(--txt-2);font-weight:550;font-size:var(--fs-meta);max-width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
 .epg .tm{flex:0 0 auto;font-variant-numeric:tabular-nums}
 .epg .bar{width:44px;height:3px;border-radius:2px;background:var(--line);overflow:hidden;flex:0 0 auto}
 .epg .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
@@ -445,7 +455,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
       <button class="chip" data-f="ok" data-label="仅看清晰" title="分辨率 ≥1080P 且 码率 ≥2 Mbps（只看画面清晰，不管网络速度）">仅看清晰</button>
       <button class="chip" data-s="1" data-label="网络 400KB/s+" title="实测下载吞吐 ≥400 KB/s（≈3.2 Mbps）—— 达到这个速度看着不卡">网络 400KB/s+</button>
       <span class="qsep"></span>
-      <button class="chip" data-q="bad" data-label="有问题" title="码率不到 2 Mbps 或 分辨率低于 620 行 —— 单独看这一批, 好知道哪些源该换">有问题</button>
+      <button class="chip" data-q="bad" data-label="有问题" title="码率不到当前分辨率档的及格线(4K 8M / 1080P 2M / 720P 1.2M / 更低 0.6M)，或 分辨率低于 620 行 —— 单独看这一批, 好知道哪些源该换">有问题</button>
     </div>
   </section>
 
@@ -519,7 +529,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
           <div class="f">每个频道备用源数量<input type="number" id="c_bak" min="1" max="8"></div>
           <div class="f">最低码率 Mbps（低于此值不显示/不导出，0=不限）
             <input type="number" id="c_min" min="0" max="50" step="0.5"></div>
-          <div class="f">EPG 节目单地址（可留空；填好就能显示"正在播出"）
+          <div class="f">自定义 EPG 地址（可留空；留空就用下面这份内置节目单）
             <input type="text" id="c_epg" placeholder="http://…/epg.xml"></div>
           <div class="f">保存位置<input type="text" id="c_out" placeholder="M3U 输出路径"></div>
           <div class="f">每个频道写入几条线路
@@ -530,9 +540,11 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
           <label class="ck"><input type="checkbox" id="c_tv">只保留电视台频道（白名单，列表更干净）</label>
           <label class="ck"><input type="checkbox" id="c_junk">过滤非电视频道（DJ / 相声 / 助眠等）</label>
           <label class="ck"><input type="checkbox" id="c_lo">隐藏地级市/县级台（只留大台，列表更短）</label>
+          <label class="ck"><input type="checkbox" id="c_cepg">内置节目单（央视官方 + 一份公开完整节目表补卫视剧名，自动更新、不用填地址）</label>
           <label class="ck"><input type="checkbox" id="c_lan">允许手机/平板在局域网访问（手机导入用）</label>
           <label class="ck"><input type="checkbox" id="c_browser">启动时自动打开网页</label>
           <div class="f hint" id="lanHint" style="grid-column:1/-1"></div>
+          <div class="f hint" id="cepgHint" style="grid-column:1/-1"></div>
         </div>
       </div>
 
@@ -584,7 +596,7 @@ function normMode(m){ return (m==="dark"||m==="light") ? m : "auto" }
 <div id="toast"></div>
 <script>
 "use strict";
-var CH=[], EPG={}, sel=new Set(), favSet=new Set();
+var CH=[], EPG={}, EPMETA=null, sel=new Set(), favSet=new Set();
 var grp="", rf="", qf="", qk="", sf="", kw="", sk="hot", fa=false, favOnly=false;
 var VERSION="-", DESKTOP="", selLoaded=false, dirty=false, fresh=false, wasUpdating=false;
 var loadedOnce=false, epgTimer=null;
@@ -634,6 +646,13 @@ if(window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEvent
 /* ---------------- 画质判据（与后端 quality_label / _src_quality 同一套口径）---------------- */
 var REST=[[2000,4,"4K"],[1000,3,"1080P"],[620,2,"720P"],[400,1,"480P"]];
 var CLARITY_H=1000, CLARITY_MB=2.0, SMOOTH_KB=400;
+/* 「码率不足」按分辨率分档(与后端 BIT_FLOOR 同一张表, tests/test_logic.py 会比对两边是否一致)：
+   1080P=2M 是用户给的锚点，4K 像素是它的 4 倍→8M，720P≈0.44 倍→1.2M，480P≈0.2 倍→0.6M。
+   以前全场景只有一条 2M 线：720P/1.5M 的正常源被误挂角标，4K/3M 的虚标源反而没人管。 */
+var BIT_FLOOR=[[1800,8.0],[1000,2.0],[620,1.2],[1,0.6]];
+function bitFloor(r){ r=r||0; if(!(r>0)) return CLARITY_MB;
+  for(var i=0;i<BIT_FLOOR.length;i++){ if(r>=BIT_FLOOR[i][0]) return BIT_FLOOR[i][1] }
+  return BIT_FLOOR[BIT_FLOOR.length-1][1] }
 function resLv(r){ r=r||0; if(r<=0) return 0; for(var i=0;i<REST.length;i++){ if(r>=REST[i][0]) return REST[i][1] } return 0.3 }
 function mbLv(m){ m=m||0; if(m<=0) return 0; if(m>=9) return 4; if(m>=5) return 3; if(m>=2.5) return 2; if(m>=1) return 1; return 0.3 }
 function resName(r){ var l=resLv(r); if(!l) return ""; if(l<1) return "低分辨率";
@@ -643,14 +662,14 @@ function mbpsTxt(m){ return (m||0).toFixed(1)+"M" }
 function qScore(c){
   var b=c.best||{}, m=b.mbps||0, rs=resLv(b.res||0);
   if(!(m>0)) return rs?(rs*10*0.35):2.0;
-  var adequate=Math.min(1, m/CLARITY_MB);
+  var adequate=Math.min(1, m/bitFloor(b.res||0));
   var bonus=Math.min(1, m/10)*5;
   var base=rs||2.0;
   return base*10*(0.55+0.45*adequate)+bonus;
 }
 function clearEnough(c){ var b=c.best||{}; return (b.res||0)>=CLARITY_H && (b.mbps||0)>=CLARITY_MB }
 function smoothEnough(c){ return kbps(c)>=SMOOTH_KB }
-function lowBit(c){ var m=(c.best||{}).mbps||0; return m>0 && m<CLARITY_MB }
+function lowBit(c){ var b=c.best||{}; var m=b.mbps||0; return m>0 && m<bitFloor(b.res||0) }
 function lowRes(c){ var r=(c.best||{}).res||0; return r>0 && r<620 }
 function detailText(c){
   var b=c.best||{}, p=[];
@@ -877,27 +896,61 @@ function fitLogos(root){
   }
 }
 
-/* ---------------- 正在播出（EPG）---------------- */
+/* ---------------- 正在播出（EPG）----------------
+   数据有三份来源（服务端已经合好，一条节目只回一个）：用户填的自定义 XMLTV 最优先，
+   然后是央视官方接口——但它对卫视常常只写"电视剧"这种大类词，于是再问一份内置的公开
+   完整节目表；官方给了具体名字的台不动。EPMETA 存的是 /api/epg 回的状态头，设置弹窗里
+   那行"内置节目单：…个台 / N 个频道显示得出节目名"就用它，让用户看得见它到底在不在工作。 */
 function epgHtml(c){
   var e=EPG[c.key];
-  if(!e) return '<div class="epg" title="没有 EPG 数据（设置里填 EPG 地址即可显示）"><span class="tm">—</span></div>';
+  if(!e) return '<div class="epg" title="这台在央视官方和公开节目表里都没有节目单（多为港台/国际/地方影视频道；有别的 EPG 地址可在设置里填）"><div class="l1"><span class="tm">—</span></div></div>';
   var w=Math.max(0,Math.min(100,e.p||0));
   return '<div class="epg" title="正在播出：'+esc(e.t)+'（'+esc(e.s)+'–'+esc(e.e)+'）">'
-    +'<b>'+esc(e.t)+'</b><span class="tm">'+esc(e.s)+'–'+esc(e.e)+'</span>'
-    +'<span class="bar"><i data-s0="'+(e.s0||0)+'" data-e0="'+(e.e0||0)+'" style="width:'+w+'%"></i></span></div>';
+    +'<div class="l1"><span class="tm">'+esc(e.s)+'–'+esc(e.e)+'</span>'
+    +'<span class="bar"><i data-s0="'+(e.s0||0)+'" data-e0="'+(e.e0||0)+'" style="width:'+w+'%"></i></span></div>'
+    +'<b>'+esc(e.t)+'</b></div>';
 }
+var EPGRELOAD=0;                       // 上次"播完就立刻重取"的时间，防止连环请求
 function tickEpg(){
-  var now=Date.now()/1000;
+  var now=Date.now()/1000, ended=false;
   [].forEach.call(document.querySelectorAll(".epg .bar i"),function(el){
     var s0=+el.dataset.s0, e0=+el.dataset.e0;
     if(!s0||!e0||e0<=s0) return;
     var p=Math.max(0,Math.min(100,(now-s0)*100/(e0-s0)));
     el.style.width=p.toFixed(1)+"%";
+    if(now>=e0 && now-e0<900) ended=true;   // 刚播完(15 分钟内)：该换成下一条了
   });
+  // 进度条是本地走的，但"下一条节目"要问服务端才有。以前只能等 5 分钟一轮的定时刷新，
+  // 一档节目播完了界面上还挂着它；现在看到播完点已过就立刻再问一次 ——
+  // /api/epg 只读内存缓存（不碰网络），一次本机请求很便宜，20 秒内不重复。
+  if(ended && Date.now()-EPGRELOAD>20000){ EPGRELOAD=Date.now(); loadEpg(); }
+}
+function epgHint(){
+  var el=$("cepgHint");
+  if(!el) return;
+  var b=(EPMETA&&EPMETA.cctv)||null, x=(EPMETA&&EPMETA.bepg)||null, u=(EPMETA&&EPMETA.custom)||null;
+  if(!b){ el.textContent="内置节目单：正在等第一轮抓取结果…"; return; }
+  if(!b.on){ el.textContent="内置节目单已关闭，只有填了自定义 EPG 地址的频道会显示节目。"; return; }
+  var ago=Math.max(0,Math.round((Date.now()/1000-(EPMETA.fetched||0))/60));
+  var src=["央视官方 "+(b.channels||0)+" 个台"];
+  if(x) src.push("公开节目表 "+(x.count||0)+" 个台");
+  var bad=[];
+  if(!b.ok) bad.push("央视官方这轮没抓到");
+  if(x&&!x.ok) bad.push("公开节目表这轮没抓到");
+  if(bad.length)
+    el.innerHTML="<b>"+esc(bad.join("、"))+"</b>（"+esc(((b.msg||"")+(x&&x.msg?" / "+x.msg:"")).slice(0,60))
+      +"，旧的先用着，稍后自动重试）";
+  else
+    el.innerHTML="内置节目单："+esc(src.join(" + "))
+      +"，本机 "+(EPMETA.total||0)+" 个频道里 <b>"+(EPMETA.count||0)+"</b> 个显示得出节目名"
+      +"（官方 <b>"+(b.matched||0)+"</b> · 公开表补 <b>"+((x&&x.matched)||0)+"</b>"
+      +((u&&u.matched)?(" · 自定义 <b>"+u.matched+"</b>"):"")+"）"
+      +"，"+ago+" 分钟前更新，之后自动继续更新";
 }
 function loadEpg(){
   fetch("/api/epg").then(function(r){return r.json()}).then(function(d){
-    EPG = d.now || {};
+    EPG = d.now || {}; EPMETA = d;
+    if($("cfgMask") && $("cfgMask").classList.contains("show")) epgHint();
     renderRows();
   }).catch(function(){});
 }
@@ -1001,7 +1054,7 @@ function rowHtml(c){
     +'<div class="qa" title="'+esc(alive?detailText(c):"这一路没连上")+'">'
       +'<span class="'+tagCls(c)+'">'+esc(alive?tagText(c):"不可用")+'</span>'
       +'<span class="meta">'+esc(alive?qText(c):"—")+'</span>'
-      +((alive&&lowBit(c))?'<span class="lowb" title="码率不到 2 Mbps：用户实测这个码率画面就一般了">码率不足</span>':'')
+      +((alive&&lowBit(c))?'<span class="lowb" title="码率不到这一档的及格线(4K 要 8M、1080P 要 2M、720P 要 1.2M、更低要 0.6M)：实测这个码率画面就一般了">码率不足</span>':'')
       +((alive&&lowRes(c))?'<span class="lowr" title="实测分辨率不到 720P，码率再高画面也细不了">分辨率低</span>':'')
     +'</div>'
     +epgHtml(c)
@@ -1325,6 +1378,7 @@ function openCfg(){
     $("c_lo").checked=c.hide_local!==false;
     $("c_urls").value=(c.urls_per_channel===undefined?3:c.urls_per_channel);
     $("c_lan").checked=!!c.lan;
+    $("c_cepg").checked=c.cctv_epg!==false;
     $("c_min").value=(c.min_mbps===undefined?1.5:c.min_mbps);
     $("c_tray").checked=!!c.tray; $("c_auto").checked=!!c.autostart; $("c_task").checked=!!c.task_registered;
     $("c_su").checked=!!c.self_update; $("c_sig").checked=c.require_sig!==false;
@@ -1338,6 +1392,8 @@ function openCfg(){
       $("lanHint").innerHTML = s.lan
         ? ('手机/电视盒导入地址：<b>'+(s.lan_url||"（没拿到局域网 IP）")+'</b>　（填到播放器的"添加 M3U 订阅"里，同一 Wi-Fi 下可用）')
         : '想用手机看：勾上上面这项并保存，程序会重启一次，然后把这里给出的地址填进手机播放器。';
+      epgHint();
+      if(!EPMETA) loadEpg();      // 状态还没拿到过(极少见)：要一次，回来会自动刷这行提示
       var st=s.source_stats||{};
       $("c_srcs").innerHTML=SRCS.map(function(x){
         var e=st[x.key];
@@ -1372,7 +1428,8 @@ $("btnCfgSave").addEventListener("click",function(){
     lan:$("c_lan").checked,
     min_mbps:(parseFloat($("c_min").value)||0),
     output_path:$("c_out").value.trim(),
-    epg_url:$("c_epg").value.trim(), open_browser:$("c_browser").checked,
+    epg_url:$("c_epg").value.trim(), cctv_epg:$("c_cepg").checked,
+    open_browser:$("c_browser").checked,
     tray:$("c_tray").checked, autostart:$("c_auto").checked, task_registered:$("c_task").checked,
     self_update:$("c_su").checked, require_sig:$("c_sig").checked, update_auto:$("c_suauto").checked,
     update_url:$("c_url").value.trim(), update_check_hours:+$("c_suh").value, sources:srcs
@@ -1380,7 +1437,9 @@ $("btnCfgSave").addEventListener("click",function(){
   fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
     .then(function(r){return r.json()}).then(function(d){
       if(d.ok){ toast("设置已保存，新的更新间隔从下次开始生效"); closeCfg(); loadStatus();
-        if(body.epg_url){ setTimeout(loadEpg,1500); } }
+        // EPG 两项(自定义地址 / 内置开关)一保存服务端就重抓，这里隔 1.5s 和 9s 各问一次：
+        // 第一次通常已经抓完，没抓完(自定义地址慢)还有第二次兜住。
+        setTimeout(loadEpg,1500); setTimeout(loadEpg,9000); }
       else toast(d.msg||"保存失败");
     }).catch(function(){toast("保存失败")});
 });
