@@ -72,6 +72,23 @@
 | **② 更新** | 首次启动会自动跑一次体检；浏览器自动打开控制台 `http://127.0.0.1:8899` |
 | **③ 导出** | 勾选想要的频道（或点「全选」）→ 点「保存 M3U」→ 把生成的 `直播源.m3u` 拖进播放器 |
 
+### 下载慢 / 下不动怎么办
+
+GitHub 的发行版附件在国内经常只有几十 KB/s（13 MB 的包要十几分钟，中途断了还得重来）。
+**下载不动就换镜像**，装的是同一份字节（下完可以核对 sha256）：
+
+| 通道 | 地址 |
+|---|---|
+| GitHub 直连 | `https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
+| 镜像一（gh-proxy） | `https://gh-proxy.com/https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
+| 镜像二（ghfast） | `https://ghfast.top/https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
+
+- 文件名保持 `LiveIPTV.exe`，下完直接双击替换旧的即可（数据在 `%LOCALAPPDATA%\LIVE直播源`，不会丢）。
+- 本版 sha256：`8144427175429fda4384c17d1fad7294e3cc494fa2b6e20a3ddf591d6ab36b1c`（13,231,659 字节）。
+  下完可以自己核一下，对不上就是没下全，重下即可。
+- 程序自己的「下载并升级」也走镜像 + 多地址重试，不用你手动挑。
+
+
 下次打开直接用上次的结果（默认每 6 小时自动更新一次，可关）。
 
 ---
