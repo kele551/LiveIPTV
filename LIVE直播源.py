@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.5.3  —— 本机直播源整理与控制台
+LIVE直播源 v1.4.3  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -73,7 +73,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.5.3"
+VERSION = "1.4.3"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
