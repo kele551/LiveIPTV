@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LIVE直播源 v1.5.2  —— 本机直播源整理与控制台
+LIVE直播源 v1.5.3  —— 本机直播源整理与控制台
 =================================================
 单文件、零第三方依赖（只用 Python 标准库）。作者：海风（kele551）
 仓库：https://github.com/kele551/LiveIPTV
@@ -33,6 +33,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import ssl
 import socket
 import subprocess
@@ -72,7 +73,7 @@ except Exception:                            # 托盘是可选功能，拿不到
 
 APP_NAME = "LIVE直播源"
 AUTHOR = "海风（kele551）"
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 REPO_URL = "https://github.com/kele551/LiveIPTV"
 
 # 升级包验签公钥（Ed25519，32 字节十六进制）；对应私钥离线保管，不随仓库分发。
@@ -7483,6 +7484,7 @@ def _swap_and_relaunch(target, newp, version):
         return {"manual": True, "path": str(newp), "msg": msg}
     try:
         subprocess.Popen([str(target), "--after-update"], close_fds=True,
+                         env=_child_env(),               # 去掉 _PYI_*，否则新实例卡在启动早期
                          creationflags=0x00000008)      # DETACHED_PROCESS
         msg = "新版本 v%s 已替换，正在重启…" % version
         log(msg)
@@ -7492,6 +7494,17 @@ def _swap_and_relaunch(target, newp, version):
                % (version, e, target))
         log(msg)
         return {"manual": True, "path": str(target), "msg": msg}
+
+
+def _child_env():
+    """拉起新进程时用的环境：把 PyInstaller 自己的 _PYI* 变量去掉。
+
+    2026-11-02 实测差别就在这儿：同样的"改名换包 + DETACHED_PROCESS"，
+    从 python.exe 里 spawn 时新进程 0.5 秒就起来了；由**打包后的自己** spawn，
+    新进程卡在启动早期（内存停在 12 MB、连 _MEI 临时目录都没建）。
+    唯一的区别就是冻结进程里的 _PYI_* 变量被一起继承了 ——
+    新实例会以为自己是"已经解包的子进程"，于是跳过解包，然后就卡在那儿。"""
+    return {k: v for k, v in os.environ.items() if not k.startswith("_PYI")}
 
 
 def _clean_stale_exe():
