@@ -14,6 +14,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -37,7 +39,9 @@ WANT_FN = ("_epg_norm", "_epg_name_keys", "_epg_hhmm", "_epg_ts", "_epg_parse",
            "_simplify", "_trad", "bit_floor", "low_bitrate", "quality_label",
            "_quality_stripped", "_uniq_nonempty", "_logo_cands",
            # 2026-11-02 升级通道：下载地址怎么排、镜像前缀怎么剥
-           "_strip_mirror", "_update_urls")
+           "_strip_mirror", "_update_urls",
+           # 2026-11-02 换包：改名换包 + 拉起新进程（要真跑一遍，别只做文本断言）
+           "_swap_and_relaunch", "_child_env")
 # 函数体里会引用的模块级常量（不摘就会 NameError，摘了等于把"改了哪个数字"也测进去）
 WANT_CONST = ("_EPG_NOISE", "CHANNEL_ALIAS", "CEPG_TTL", "CEPG_RETRY", "CEPG_ROLL",
               "CEPG_URL", "CEPG_CHANNELS", "CEPG_ALIAS",
@@ -89,6 +93,10 @@ def grab():
     if missing:
         raise SystemExit("源码里没找到这些函数/常量，测试先失效: %s" % missing)
     # 两份缓存的运行时状态由测试自己给（函数体是按名字读全局的，所以放进 ns 就行）
+    ns["os"] = os
+    ns["shutil"] = shutil
+    ns["sys"] = sys
+    ns["subprocess"] = subprocess
     ns["_EPG_LOCK"] = threading.Lock()
     ns["_CEPG_LOCK"] = threading.Lock()
     ns["_EPG"] = {"ok": False, "msg": "", "url": "", "fetched": 0.0, "count": 0,
@@ -795,6 +803,68 @@ def main():
           "if args.after_update:" in msrc and "已是最新或未配置更新地址" in msrc, True)
     check("放回新包失败时把旧 exe 改回来", "os.rename(old, target)" in msrc, True)
     check("启动时清理 .old/.new 残留", "_clean_stale_exe()" in msrc, True)
+    check("拉起新进程时清掉 _PYI* 环境变量(否则新实例卡在启动早期)",
+          "env=_child_env()" in msrc and 'not k.startswith("_PYI")' in msrc, True)
+
+    # 真换一次包（临时目录里造两个不同的 exe，subprocess 换成桩，不真起进程）
+    import subprocess as _sp
+
+    class _FakePopen:
+        calls = []
+
+        def __init__(self, args, **kw):
+            _FakePopen.calls.append((list(args), dict(kw)))
+
+    real_popen = _sp.Popen
+    saved = {k: v for k, v in os.environ.items() if k.startswith("_PYI")}
+    os.environ["_PYI_PARENT_PROCESS_LEVEL"] = "1"
+    ns["subprocess"] = type("S", (), {"Popen": _FakePopen})
+    try:
+        d = tempfile.mkdtemp(prefix="swaptest-")
+        tgt = os.path.join(d, "app.exe")
+        newp = os.path.join(d, "downloaded.exe")
+        io.open(tgt, "wb").write(b"OLD-EXE-BYTES")
+        io.open(newp, "wb").write(b"NEW-EXE-BYTES")
+        res = ns["_swap_and_relaunch"](Path(tgt), Path(newp), "9.9.9")
+        got = io.open(tgt, "rb").read()
+        check("换包：目标文件换成了新字节", got, b"NEW-EXE-BYTES")
+        check("换包：旧 exe 留在 .old 里", io.open(tgt + ".old", "rb").read(), b"OLD-EXE-BYTES")
+        check("换包：不留 .new 残渣", os.path.exists(tgt + ".new"), False)
+        check("换包：接口回报 replacing", res.get("replacing"), True)
+        args0, kw0 = _FakePopen.calls[-1]
+        check("换包：新进程带 --after-update", args0[-1], "--after-update")
+        check("换包：子进程环境里没有 _PYI*",
+              [k for k in kw0.get("env", {}) if k.startswith("_PYI")], [])
+
+        # 失败分支：让第二次 os.rename（把 .new 放回原位）抛错 —— 旧 exe 必须原样回来
+        class _RenameBoom:
+            def __init__(self, real):
+                self.real, self.n = real, 0
+
+            def __getattr__(self, k):
+                return getattr(self.real, k)
+
+            def rename(self, a, b):
+                self.n += 1
+                if self.n == 2:
+                    raise OSError("模拟放回失败")
+                return self.real.rename(a, b)
+
+        io.open(newp, "wb").write(b"NEW-EXE-BYTES-2")
+        io.open(tgt, "wb").write(b"OLD-EXE-BYTES-2")
+        ns["os"] = _RenameBoom(os)
+        try:
+            res2 = ns["_swap_and_relaunch"](Path(tgt), Path(newp), "9.9.9")
+        finally:
+            ns["os"] = os
+        check("换包失败：不谎报成功", bool(res2.get("manual")), True)
+        check("换包失败：旧 exe 回到原位", io.open(tgt, "rb").read(), b"OLD-EXE-BYTES-2")
+        shutil.rmtree(d, ignore_errors=True)
+    finally:
+        ns["subprocess"] = _sp
+        for k in ("_PYI_PARENT_PROCESS_LEVEL",):
+            os.environ.pop(k, None)
+        os.environ.update(saved)
 
     print("-" * 70)
     if fails:
