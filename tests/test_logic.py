@@ -23,6 +23,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "LIVE直播源.py")
 WANT_METHOD = ("guard_verdict", "compute_stats")
@@ -41,14 +42,22 @@ WANT_FN = ("_epg_norm", "_epg_name_keys", "_epg_hhmm", "_epg_ts", "_epg_parse",
            # 2026-11-02 升级通道：下载地址怎么排、镜像前缀怎么剥
            "_strip_mirror", "_update_urls",
            # 2026-11-02 换包：改名换包 + 拉起新进程（要真跑一遍，别只做文本断言）
-           "_swap_and_relaunch", "_child_env")
+           "_swap_and_relaunch", "_child_env",
+           # 2026-11-09：推广域名黑名单匹配（精确 + 子域）
+           "_blocked_host",
+           # 2026-11-15：实测到网页/占位页就自动拉黑整站（黑名单不够用时兜底）
+           "_bad_note", "_load_bad_hosts", "_save_bad_hosts", "_host_banned", "mark_bad_host")
 # 函数体里会引用的模块级常量（不摘就会 NameError，摘了等于把"改了哪个数字"也测进去）
 WANT_CONST = ("_EPG_NOISE", "CHANNEL_ALIAS", "CEPG_TTL", "CEPG_RETRY", "CEPG_ROLL",
               "CEPG_URL", "CEPG_CHANNELS", "CEPG_ALIAS",
               "BEPG_URLS", "BEPG_TTL", "BEPG_RETRY", "BEPG_GENERIC", "BEPG_JUNK", "UPDATE_MIRRORS",
               # 2026-11-02：繁简表、码率分档表、以及"哪条源默认开"这张表
               "_TRAD_S2T", "_T2S", "_QUAL_DEC", "BIT_FLOOR",
-              "CLARITY_HEIGHT", "CLARITY_MBPS", "SOURCES")
+              "CLARITY_HEIGHT", "CLARITY_MBPS", "SOURCES",
+              # 2026-11-09：已知推广/跳转域名表
+              "BLOCK_HOSTS",
+              # 2026-11-15：自动拉黑的票数与有效期
+              "BAD_HOST_TTL", "BAD_HOST_NEED", "BAD_NOTE_PREFIX")
 
 fails = []
 
@@ -111,6 +120,11 @@ def grab():
                    "next_try": 0.0, "progs": {}, "by_name": {}, "count": 0, "url": ""}
     ns["BEPG_CACHE_PATH"] = Path(os.path.join(tempfile.mkdtemp(prefix="live_bepg_"),
                                               "builtin_epg_cache.json"))
+    # 2026-11-15：自动拉黑整站那一套 —— urlparse 和"拉黑名单"的状态由测试给，落到临时目录
+    ns["urlparse"] = urlparse
+    ns["_BAD_HOSTS"] = None
+    ns["BAD_HOST_PATH"] = Path(os.path.join(tempfile.mkdtemp(prefix="live_badhost_"),
+                                            "bad_hosts.json"))
     return ns
 
 
@@ -149,6 +163,68 @@ def ssl_sites():
             if kw.arg == "context" and isinstance(kw.value, ast.Name):
                 ctx = kw.value.id
         out.append((fname, ctx))
+    # 2026-11-09：_open 改成走 _get_opener() 的自定义 opener（带 _SafeRedirectHandler，
+    # 拦掉跳往推广域名的 302），不再直接调 urlopen。TLS 上下文改由 opener 里的
+    # HTTPSHandler(context=_SSL_CTX) 显式给出；照样登记进判据，别让「换了写法」
+    # 变成没人盯 TLS 分工的缺口。
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "HTTPSHandler":
+            continue
+        fname, cur = "", node
+        while cur is not None:
+            if isinstance(cur, ast.FunctionDef):
+                fname = cur.name
+                break
+            cur = parents.get(cur)
+        if fname != "_get_opener":
+            continue
+        for kw in node.keywords or []:
+            if kw.arg == "context" and isinstance(kw.value, ast.Name):
+                out.append(("_open", kw.value.id))
+    return out
+
+
+def block_guard():
+    """2026-11-09：推广域名跳转拦截的静态判据（不联网）。
+
+    盯住四件事：opener 的 TLS 上下文、黑名单表、拦截处理器的继承关系、
+    以及三处拦截调用别被删（源地址 / 302 目标 / 抽样筛选）。
+    2026-11-15：再盯"实测到网页/占位页就自动拉黑整站"这条兜底还连着没有。
+    """
+    tree = ast.parse(io.open(SRC, encoding="utf-8").read(), filename=SRC)
+    out = {"bases": [], "hosts": set(), "calls": {}, "need": None,
+           "has_mark": False, "mark_calls": 0}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_SafeRedirectHandler":
+            out["bases"] = [ast.unparse(b) for b in node.bases]
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == "BLOCK_HOSTS":
+                    try:
+                        out["hosts"] = set(ast.literal_eval(node.value))
+                    except Exception:
+                        pass
+                if isinstance(t, ast.Name) and t.id == "BAD_HOST_NEED":
+                    try:
+                        out["need"] = ast.literal_eval(node.value)
+                    except Exception:
+                        pass
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_open", "is_blocked", "redirect_request", "_blocked_host"):
+            hit = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                      and n.func.id == "_blocked_host" for n in ast.walk(node))
+            out["calls"][node.name] = out["calls"].get(node.name, False) or hit
+        if isinstance(node, ast.FunctionDef) and node.name == "_blocked_host":
+            hit = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                      and n.func.id == "_host_banned" for n in ast.walk(node))
+            out["calls"]["_blocked_host_dyn"] = out["calls"].get("_blocked_host_dyn", False) or hit
+        if isinstance(node, ast.FunctionDef) and node.name == "mark_bad_host":
+            out["has_mark"] = True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "mark_bad_host":
+            out["mark_calls"] += 1
     return out
 
 
@@ -272,6 +348,41 @@ def main():
           ["_check_logo", "_epg_fetch", "_grab", "_open", "one"])
     check("每个 urlopen 都显式写了 context（没有默认裸连）",
           len([1 for n, c in sites if c not in ("_SSL_CTX", "_SSL_STRICT")]), 0)
+
+    print("-" * 70)
+    print("3.5 推广域名跳转拦截（2026-11-09 火绒报毒修复，不联网）")
+    bg = block_guard()
+    check("BLOCK_HOSTS 补进 jiduo.me 和它的子域",
+          {"jiduo.me", "kkk.jjjj.jiduo.me"} <= bg["hosts"], True)
+    check("_SafeRedirectHandler 继承 HTTPRedirectHandler",
+          any("HTTPRedirectHandler" in b for b in bg["bases"]), True)
+    check("_open 拒掉黑名单源地址", bg["calls"].get("_open", False), True)
+    check("302 处理器检查跳转目标", bg["calls"].get("redirect_request", False), True)
+    check("抽样筛选改用子域匹配", bg["calls"].get("is_blocked", False), True)
+    bh = ns["_blocked_host"]
+    check("黑名单：精确命中", bh("lskk.top"), True)
+    check("黑名单：多级子域命中", bh("kkk.jjjj.jiduo.me"), True)
+    check("黑名单：大小写 + 尾点", bh("KKK.JJJJ.JIDUO.ME."), True)
+    check("黑名单：正常域名不误伤", bh("example.com"), False)
+    check("黑名单：同名前缀不算命中", bh("jiduo.me.example.com"), False)
+    check("黑名单：空值不报错", bh(""), False)
+
+    print("-" * 70)
+    print("3.6 实测到网页/占位页就自动拉黑整站（2026-11-15 兜底，不联网）")
+    check("自动拉黑：_blocked_host 会查自动拉黑名单", bg["calls"].get("_blocked_host_dyn"), True)
+    check("自动拉黑：mark_bad_host 还在", bg["has_mark"], True)
+    check("自动拉黑：探测处至少两处记票", bg["mark_calls"] >= 2, True)
+    check("自动拉黑：阈值 2 票", bg["need"], 2)
+    check("自动拉黑：网页/占位页的说明都算坏源", (ns["_bad_note"]("返回网页(非直播流)"),
+                                                ns["_bad_note"]("假源(跳转到占位视频)")), (True, True))
+    check("自动拉黑：连不上不记票", (ns["_bad_note"]("TCP不可达"), ns["_bad_note"]("")), (False, False))
+    mbh = ns["mark_bad_host"]
+    check("自动拉黑：第 1 票不整站拉黑", mbh("http://promo.example.org/a.php?id=1"), False)
+    check("自动拉黑：同站第 2 票整站拉黑", mbh("http://promo.example.org/b.php?id=2"), True)
+    check("自动拉黑：该站其它地址一并被拦", bh("promo.example.org"), True)
+    check("自动拉黑：换站不受牵连", bh("ok.example.org"), False)
+    check("自动拉黑：票数与时间落了盘",
+          ns["_load_bad_hosts"]().get("promo.example.org", {}).get("n"), 2)
 
     print("-" * 70)
     print("4. 页面按钮 ↔ 服务端路由：fetch 的方法必须真有人接（不联网）")

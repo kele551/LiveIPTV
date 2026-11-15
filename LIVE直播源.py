@@ -895,8 +895,113 @@ def keep_entry(e, cfg):
 
 # ---------------------------------------------------------------- 网络探测
 
+# 已知会返回推广/跳转脚本的网页域名（火绒报 Trojan/JS.Redirector 的那一类）。
+# 探测阶段一律不请求：既是无效源，也会让杀软 Web 扫描反复报毒。
+# 匹配方式：精确命中或子域命中（kkk.jjjj.jiduo.me 是 jiduo.me 的子域）。
+BLOCK_HOSTS = {"live.iill.top", "www.iill.top", "zby.lskk.top", "lskk.top",
+               "kkk.jjjj.jiduo.me", "jiduo.me"}
+
+# 2026-11-15：手工黑名单只能枚举"已经见过的"站点，换一个没见过的推广站照样会被连一次、
+# 照样让杀软报一条"程序在访问带毒网址"。所以再加一层自动拉黑：实测到这个地址返回的是网页 /
+# 占位跳转页，就记该站点一票；同一站点攒够 2 票整站拉黑 3 天，这一轮里后面的同域地址不再请求。
+# （要 2 票是因为同一个正常站点上偶尔也会有一两条烂地址，别一票就把整站废掉。）
+BAD_HOST_PATH = BASE / "bad_hosts.json"
+BAD_HOST_TTL = 3 * 86400
+BAD_HOST_NEED = 2
+# 这两种说明都表示"整条地址不是直播流，而是网页/推广中转"
+BAD_NOTE_PREFIX = ("返回网页", "假源")
+_BAD_HOSTS = None
+
+
+def _load_bad_hosts():
+    global _BAD_HOSTS
+    if _BAD_HOSTS is None:
+        _BAD_HOSTS = {}
+        try:
+            raw = json.loads(BAD_HOST_PATH.read_text("utf-8"))
+            now = time.time()
+            if isinstance(raw, dict):
+                for h, v in raw.items():
+                    if not isinstance(v, dict):
+                        continue
+                    ts = float(v.get("ts") or 0)
+                    if now - ts < BAD_HOST_TTL:
+                        _BAD_HOSTS[str(h)] = {"n": int(v.get("n") or 0), "ts": ts}
+        except Exception:
+            _BAD_HOSTS = {}
+    return _BAD_HOSTS
+
+
+def _save_bad_hosts():
+    try:
+        BAD_HOST_PATH.write_text(json.dumps(_load_bad_hosts(), ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _host_banned(host):
+    host = (host or "").lower().rstrip(".")
+    rec = _load_bad_hosts().get(host) if host else None
+    return bool(rec) and int(rec.get("n") or 0) >= BAD_HOST_NEED
+
+
+def mark_bad_host(url):
+    """实测到这条地址返回网页/占位跳转页：给它的站点记一票，够了就整站拉黑。"""
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if not host or host in BLOCK_HOSTS:
+        return False
+    st = _load_bad_hosts()
+    rec = st.get(host) or {"n": 0, "ts": 0}
+    rec["n"] = int(rec.get("n") or 0) + 1
+    rec["ts"] = time.time()
+    st[host] = rec
+    _save_bad_hosts()
+    if rec["n"] >= BAD_HOST_NEED:
+        if rec["n"] == BAD_HOST_NEED:      # 只在刚好够票那一次写一条日志，别每轮刷屏
+            log("站点拉黑 %d 天: %s（实测返回网页/占位页，后续不再请求）"
+                % (BAD_HOST_TTL // 86400, host))
+        return True
+    return False
+
+
+def _bad_note(note):
+    return bool(note) and note.startswith(BAD_NOTE_PREFIX)
+
+
+def _blocked_host(host):
+    host = (host or "").lower().rstrip(".")
+    if not host:
+        return False
+    if any(host == b or host.endswith("." + b) for b in BLOCK_HOSTS):
+        return True
+    return _host_banned(host)
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拦掉跳往推广/中转页的 301/302，不让 urllib 自动跟随到带毒脚本页。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _blocked_host(urlparse(newurl).hostname):
+            raise RuntimeError("已拦截跳转: %s" % newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = None
+
+
+def _get_opener():
+    global _SAFE_OPENER
+    if _SAFE_OPENER is None:
+        _SAFE_OPENER = urllib.request.build_opener(
+            _SafeRedirectHandler(), urllib.request.HTTPSHandler(context=_SSL_CTX))
+    return _SAFE_OPENER
+
+
 def _open(url, timeout):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout, context=_SSL_CTX)
+    # 源 URL 本身就在黑名单里：直接拒；重定向目标由 _SafeRedirectHandler 再挡一层
+    if _blocked_host(urlparse(url).hostname):
+        raise RuntimeError("已拦截黑名单地址: %s" % url)
+    return _get_opener().open(urllib.request.Request(url, headers=UA), timeout=timeout)
 
 
 def probe_reach(e, timeout):
@@ -2970,7 +3075,7 @@ def resolve_logo(name, src_logo):
 
 
 # 判定为「网页/中转页」的地址记下来，短期内不再重复探测(也避免重复触发杀软)
-BLOCK_HOSTS = {"live.iill.top", "www.iill.top", "zby.lskk.top", "lskk.top"}
+# BLOCK_HOSTS / _blocked_host 定义在上方「网络探测」段（_open 之前），此处不再重复定义
 BAD_URL_PATH = BASE / "bad_urls.json"
 BAD_URL_TTL = 3 * 86400
 _BAD_URLS = None
@@ -3293,7 +3398,7 @@ class Updater:
                 return u
 
         def is_blocked(u):
-            if u in bad or host_of(u) in BLOCK_HOSTS:
+            if u in bad or _blocked_host(host_of(u)):
                 return True
             hs = hstate.get(hp_of(u)) or {}
             if (hs.get("ok", 0) == 0 and hs.get("dead", 0) >= 4
@@ -3313,8 +3418,9 @@ class Updater:
 
             def work(u):
                 ok, ttfb, note = probe_reach(by_url[u][0], timeout)
-                if not ok and note.startswith("返回网页"):
+                if not ok and _bad_note(note):
                     mark_bad_url(u)
+                    mark_bad_host(u)          # 同一站点攒够票就整站拉黑
                 mark(u, ok, ttfb, note)
                 with lock:
                     counter[0] += 1
@@ -3371,8 +3477,9 @@ class Updater:
                     host_speed[hp] = max(host_speed.get(hp, 0), speed or 0)
                 elif note.startswith(("不可达", "连接被", "超时", "timed")):
                     host_fail[hp] = host_fail.get(hp, 0) + 1
-            if not ok and note.startswith("返回网页"):
+            if not ok and _bad_note(note):
                 mark_bad_url(u)
+                mark_bad_host(u)              # 同一站点攒够票就整站拉黑，别让杀软反复报
             # 能连上但吞吐低到 0.5 Mbps 以下，播起来必然卡：直接当不能用，别让它挤掉好线路
             if ok and speed and speed < 0.5:
                 ok, note = False, "下载速度过慢(%.2f Mbps)" % speed
