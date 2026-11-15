@@ -1,1 +1,1 @@
-{"version": "1.4.4", "url": "https://github.com/kele551/LiveIPTV/releases/download/v1.4.4/LiveIPTV.exe", "notes": "修火绒误报：测源碰到推广跳转页时，同站点累计 2 票就整站拉黑 3 天。功能与上一版相同，下载后覆盖安装即可。", "sha256": "14cb7deb6a2b41d57bb29633d9cf7bd8ac4debd8c6498d76ef42025ab6717636", "size": 13280683}
+{"version": "1.4.4", "url": "https://gh-proxy.com/https://github.com/kele551/LiveIPTV/releases/download/v1.4.4/LiveIPTV.exe", "notes": "修火绒误报：测源碰到推广跳转页时，同站点累计 2 票就整站拉黑 3 天。功能与上一版相同，下载后覆盖安装即可。", "sha256": "14cb7deb6a2b41d57bb29633d9cf7bd8ac4debd8c6498d76ef42025ab6717636", "size": 13280683}
