@@ -79,12 +79,12 @@ GitHub 的发行版附件在国内经常只有几十 KB/s（13 MB 的包要十�
 
 | 通道 | 地址 |
 |---|---|
-| GitHub 直连 | `https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
-| 镜像一（gh-proxy） | `https://gh-proxy.com/https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
-| 镜像二（ghfast） | `https://ghfast.top/https://github.com/kele551/LiveIPTV/releases/download/v1.4.3/LiveIPTV.exe` |
+| GitHub 直连 | `https://github.com/kele551/LiveIPTV/releases/download/v1.4.4/LiveIPTV.exe` |
+| 镜像一（gh-proxy） | `https://gh-proxy.com/https://github.com/kele551/LiveIPTV/releases/download/v1.4.4/LiveIPTV.exe` |
+| 镜像二（ghfast） | `https://ghfast.top/https://github.com/kele551/LiveIPTV/releases/download/v1.4.4/LiveIPTV.exe` |
 
 - 文件名保持 `LiveIPTV.exe`，下完直接双击替换旧的即可（数据在 `%LOCALAPPDATA%\LIVE直播源`，不会丢）。
-- 本版 sha256：`8144427175429fda4384c17d1fad7294e3cc494fa2b6e20a3ddf591d6ab36b1c`（13,231,659 字节）。
+- 本版 sha256：`14cb7deb6a2b41d57bb29633d9cf7bd8ac4debd8c6498d76ef42025ab6717636`（13,280,683 字节）。
   下完可以自己核一下，对不上就是没下全，重下即可。
 - 程序自己的「下载并升级」也走镜像 + 多地址重试，不用你手动挑。
 
