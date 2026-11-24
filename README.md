@@ -269,3 +269,9 @@ Ed25519 验签为自行实现的 `_ed25519.py`（RFC 8032 参考实现思路，M
 ---
 
 <p align="center"><sub>作者 <b>海风（kele551）</b>　·　<a href="https://github.com/kele551/LiveIPTV">github.com/kele551/LiveIPTV</a></sub></p>
+
+## 检索关键词 / Search keywords
+
+**中文**：IPTV、直播源、直播源整理、电视台列表、电视直播、M3U、m3u8、节目单、播放列表、码率排序、源测速、Windows 播放器
+
+**English**: iptv, iptv playlist, m3u playlist, m3u8, hls, live tv, tv channels, channel list, epg, playlist builder, bitrate test
