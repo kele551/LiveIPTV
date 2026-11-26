@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LIVE直播源 LiveIPTV · 直播源整理与可用性检测</title>
+<style>
+  :root{--bg:#f6f8fa;--card:#fff;--text:#1f2328;--muted:#59636e;--accent:#0969da;--border:#d1d9e0}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#151b23;--text:#f0f6fc;--muted:#9198a1;--accent:#4493f8;--border:#3d444d}}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:"Manrope","Geist","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{max-width:640px;width:100%;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;text-align:center}
+  .icon{width:88px;height:88px;border-radius:20px;margin:0 auto 20px;display:block}
+  h1{font-size:24px;line-height:32px;font-weight:600;margin-bottom:8px;text-wrap:balance}
+  .tagline{color:var(--muted);font-size:14px;line-height:20px;margin-bottom:24px}
+  ul{list-style:none;text-align:left;max-width:430px;margin:0 auto 24px;color:var(--muted);font-size:14px;line-height:20px}
+  li{margin:8px 0}
+  .btn{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;padding:8px 12px;border-radius:8px;font-weight:600;font-size:14px;line-height:20px;margin:4px;transition:transform 300ms cubic-bezier(0.22,1,0.36,1),background-color 300ms cubic-bezier(0.22,1,0.36,1),color 300ms cubic-bezier(0.22,1,0.36,1)}
+  .btn:hover{background:color-mix(in srgb,var(--accent) 88%,#000)}
+  .btn:active{transform:translateY(1px) scale(0.98)}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--border)}
+  .foot{margin-top:24px;color:var(--muted);font-size:12px;line-height:16px}
+  .foot a{color:var(--accent)}
+  @media (prefers-reduced-motion:reduce){.btn{transition:none}}
+</style>
+</head>
+<body>
+<div class="card">
+  <img class="icon" src="icon.png" alt="LIVE直播源 LiveIPTV">
+  <h1>LIVE直播源 LiveIPTV</h1>
+  <p class="tagline">直播源整理与可用性检测 —— 实测哪些真能播，导出一份干净的 M3U</p>
+  <ul>
+    <li>抓公开源合并去重，逐条实测连通性，按源可信度排序</li>
+    <li>解视频流测真实分辨率与码率，不看标称、不看频道名</li>
+    <li>勾选频道导出 M3U，PotPlayer / VLC / 电视盒子直接用</li>
+    <li>不含节目内容、不解密不绕限制，只整理公开可访问的链接</li>
+  </ul>
+  <a class="btn" href="https://github.com/kele551/LiveIPTV/releases/latest">⬇ 下载最新版（GitHub 主源）</a>
+  <a class="btn ghost" href="https://github.com/kele551/LiveIPTV">GitHub 仓库</a>
+  <div class="foot">MIT License · 作者：海风（kele551）<br>
+    <a href="https://github.com/kele551/LiveIPTV">GitHub（唯一主源）</a></div>
+</div>
+</body>
+</html>
