@@ -3,6 +3,8 @@
 
 <h1>LIVE直播源</h1>
 
+  <p>🔗 我的其他工具：<a href="https://kele551-apps.pages.dev/">工具合集</a> · <a href="https://github.com/kele551">作者主页</a></p>
+
 <a href="https://github.com/kele551/LiveIPTV/releases" title="点击去下载（各平台发行版合计 · 实时）"><img alt="Downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkele551-badge.kele551.workers.dev%2F%3Frepo%3DLiveIPTV%26kind%3Ddownloads&style=flat-square" height="30"></a>
 <a href="https://github.com/kele551/LiveIPTV" title="浏览量 · 各平台访问计数合计 · 实时"><img alt="浏览量" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fkele551-badge.kele551.workers.dev%2F%3Frepo%3DLiveIPTV%26kind%3Dviews&style=flat-square" height="30"></a>
 
