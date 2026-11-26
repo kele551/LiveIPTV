@@ -1,0 +1,36 @@
+name: issue-triage
+
+# 新 Issue 按标题前缀自动打标签；模板已自带标签的，重复 add 幂等无害。
+# 只在仓库内打标签，不发外部通知；动态提醒走 GitHub 原生 watch 通知。
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    name: 按标题分诊打标签
+    runs-on: ubuntu-latest
+    steps:
+      - name: 匹配标题前缀并打标签
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ github.event.issue.title }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          case "$TITLE" in
+            *"[建议]"*|*"[需求]"*) label="enhancement" ;;
+            *"[Bug]"*|*"[bug]"*|*"[BUG]"*|*"[报错]"*) label="bug" ;;
+            *"docs:"*|*"[文档]"*) label="documentation" ;;
+            *"[问题]"*|*"[咨询]"*|*"[疑问]"*) label="question" ;;
+            *) label="" ;;
+          esac
+          if [ -n "$label" ]; then
+            gh issue edit "$NUMBER" --add-label "$label" --repo "$REPO"
+            echo "已打标签: $label"
+          else
+            echo "标题未命中已知前缀，不打标签"
+          fi
